@@ -1,0 +1,8 @@
+venv/
+venv_win/
+.env
+eval_images/
+tmp/
+__pycache__/
+*/__pycache__/
+**/__pycache__/

@@ -1,0 +1,51 @@
+classes:
+  studio:
+    - "a photo taken in a photo studio with seamless backdrop"
+    - "studio photography with professional lighting equipment"
+    - "portrait session in a studio"
+  room:
+    - "an indoor room interior such as a living room or bedroom"
+    - "a normal apartment room interior"
+    - "home interior scene"
+  city:
+    - "a street scene in a city with buildings and roads"
+    - "urban street with traffic and pedestrians"
+    - "city downtown street"
+  forest:
+    - "a dense forest with trees"
+    - "woodland outdoor scene"
+    - "forest trail with foliage"
+  sea:
+    - "a beach by the sea or ocean with waves"
+    - "seaside coastline"
+    - "ocean beach scene"
+  desert:
+    - "a desert landscape with sand dunes"
+    - "arid barren desert"
+    - "sahara-like sand desert"
+
+zero_shot:
+  model: siglip
+  device: auto
+  batch_size: 16
+  score_threshold: 0.55
+  margin_threshold: 0.10
+  multilingual: true
+  alternate_model: openclip
+  alternate_weight: 0.5
+
+color_judge:
+  method: hsv_s_mean
+  threshold: 0.08
+  pixel_threshold: 0.12
+  min_color_ratio: 0.02
+
+output:
+  csv_path: outputs/pred.csv
+  json_path: outputs/pred.json
+  move_to_class_dirs: false
+
+review:
+  review_label: needs_review
+
+seed: 42

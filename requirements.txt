@@ -1,0 +1,16 @@
+torch
+torchvision
+transformers
+open_clip_torch
+sentencepiece
+protobuf
+openai
+pillow
+numpy
+pandas
+scikit-learn
+opencv-python
+PyYAML
+typer[toml]
+tqdm
+tabulate
