@@ -14,3 +14,7 @@ PyYAML
 typer[toml]
 tqdm
 tabulate
+faiss-cpu
+fastapi
+uvicorn
+python-multipart

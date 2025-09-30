@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <title>マルチ属性画像検索</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      font-family: "Segoe UI", "Hiragino Sans", system-ui;
+      background: #f4f5f7;
+      color: #1e1f21;
+    }
+    body { margin: 0; padding: 0; }
+    main { max-width: 1200px; margin: 0 auto; padding: 24px; }
+    h1 { margin-bottom: 1.2rem; }
+    .layout { display: grid; grid-template-columns: 1fr; gap: 24px; }
+    @media (min-width: 960px) {
+      .layout { grid-template-columns: 340px 1fr; }
+    }
+    form.search-panel { background: #fff; border-radius: 12px; padding: 18px; box-shadow: 0 2px 8px rgba(0,0,0,0.08); display: flex; flex-direction: column; gap: 16px; }
+    label { display: block; font-weight: 600; margin-bottom: 4px; }
+    input[type="text"], textarea { width: 100%; padding: 8px 10px; border-radius: 6px; border: 1px solid #cbd2d9; font-size: 14px; box-sizing: border-box; }
+    textarea { min-height: 60px; }
+    details { background: #f5f7fa; border-radius: 10px; padding: 10px 12px; }
+    details summary { cursor: pointer; font-weight: 600; }
+    .attr-block { margin-top: 12px; display: grid; grid-template-columns: 1fr; gap: 12px; }
+    .attr-field { background: #fff; border-radius: 10px; padding: 12px; border: 1px solid #e3e7eb; }
+    .attr-field h3 { margin: 0 0 8px; font-size: 15px; }
+    .weight-row { display: flex; align-items: center; gap: 12px; margin-top: 8px; font-size: 13px; }
+    input[type="range"] { width: 100%; }
+    .weight-value { min-width: 40px; text-align: right; font-variant-numeric: tabular-nums; }
+    .image-upload { background: #fff; border-radius: 10px; padding: 12px; border: 1px solid #e3e7eb; display: flex; flex-direction: column; gap: 8px; }
+    button.primary { padding: 10px 16px; font-size: 15px; font-weight: 600; color: #fff; background: #0055ff; border: none; border-radius: 8px; cursor: pointer; }
+    button.primary:hover { background: #1e6bff; }
+    .results-panel { display: flex; flex-direction: column; gap: 24px; }
+    .status { font-size: 13px; color: #4b5563; }
+    .message { padding: 12px; border-radius: 8px; background: #fff4e5; color: #7a3917; border: 1px solid #f3c99b; }
+    .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 18px; }
+    .card { background: #fff; border-radius: 12px; padding: 14px; box-shadow: 0 2px 6px rgba(0,0,0,0.06); display: flex; flex-direction: column; gap: 12px; }
+    .card img { width: 100%; border-radius: 10px; }
+    .card h3 { margin: 0; font-size: 15px; display: flex; justify-content: space-between; align-items: baseline; }
+    .card h3 span.score { font-size: 13px; color: #4b5563; }
+    .card details { background: #f5f7fa; border-radius: 10px; padding: 10px; }
+    .card details summary { font-size: 14px; }
+    .detail-view { background: #fff; border-radius: 12px; padding: 18px; box-shadow: 0 2px 8px rgba(0,0,0,0.08); display: flex; flex-direction: column; gap: 16px; }
+    .detail-view h2 { margin: 0; font-size: 18px; }
+    .detail-layout { display: grid; gap: 16px; }
+    @media (min-width: 960px) {
+      .detail-layout { grid-template-columns: 2fr 1fr; }
+    }
+    .detail-img img { width: 100%; border-radius: 12px; }
+    pre { background: #111827; color: #e5e7eb; padding: 12px; border-radius: 8px; font-size: 13px; overflow: auto; }
+    .contrib { display: flex; flex-direction: column; gap: 6px; font-size: 13px; }
+    .contrib-bar { height: 10px; background: linear-gradient(90deg, #4f46e5, #22d3ee); border-radius: 6px; }
+    .quick-actions form { display: inline-block; margin-right: 8px; }
+    .quick-actions button { background: #f3f4f6; border: 1px solid #d1d5db; border-radius: 6px; padding: 6px 10px; cursor: pointer; }
+    .quick-actions button:hover { background: #e5e7eb; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>マルチ属性画像検索 PoC</h1>
+    <div class="layout">
+      <form class="search-panel" action="/search" method="post" enctype="multipart/form-data">
+        <input type="hidden" name="mode" value="search" />
+        <div>
+          <label for="general_query">キーワード</label>
+          <input type="text" id="general_query" name="general_query" value="{{ form_values.general_query }}" placeholder="例: 夕焼けのビーチで遊ぶ子ども" />
+        </div>
+        <details>
+          <summary>詳細条件</summary>
+          <div class="attr-block">
+            {% for key, label in attr_labels.items() %}
+            <div class="attr-field">
+              <h3>{{ label }}</h3>
+              <input type="text" name="{{ key }}_query" value="{{ form_values.attr_queries[key] }}" placeholder="{{ label }} のテキスト" />
+              <div class="weight-row">
+                <span>重み</span>
+                <input type="range" name="{{ key }}_weight" min="0" max="100" step="5" value="{{ form_values.attr_weights[key] }}" />
+                <span class="weight-value">{{ '%0.2f'|format(form_values.attr_weights[key] / 100) }}</span>
+              </div>
+            </div>
+            {% endfor %}
+          </div>
+        </details>
+        <div class="image-upload">
+          <label for="image_file">画像から検索</label>
+          <input type="file" id="image_file" name="image_file" accept="image/*" />
+          <div class="weight-row">
+            <span>画像重み</span>
+            <input type="range" name="image_weight" min="0" max="100" step="5" value="{{ form_values.image_weight }}" />
+            <span class="weight-value">{{ '%0.2f'|format(form_values.image_weight / 100) }}</span>
+          </div>
+        </div>
+        <div>
+          <label for="top_k">取得件数</label>
+          <input type="number" id="top_k" name="top_k" value="{{ form_values.top_k }}" min="1" max="200" />
+        </div>
+        <button type="submit" class="primary">検索する</button>
+      </form>
+
+      <section class="results-panel">
+        {% if message %}
+          <div class="message">{{ message }}</div>
+        {% endif %}
+        {% if elapsed %}
+          <div class="status">検索時間: {{ '%.2f'|format(elapsed) }} 秒 / 件数: {{ results|length }}</div>
+        {% endif %}
+        {% if not results %}
+          <div class="status">検索結果がありません。条件と重みを調整してください。</div>
+        {% else %}
+          <div class="cards">
+            {% for item in results %}
+            <div class="card">
+              <img src="data:image/jpeg;base64,{{ item.thumb }}" alt="thumb" />
+              <h3>
+                <span>ID: {{ item.image_id }}</span>
+                <span class="score">score {{ '%.3f'|format(item.score) }}</span>
+              </h3>
+              <p style="margin:0; font-size:13px; color:#4b5563;">{{ item.image_path }}</p>
+              <details>
+                <summary>詳細を表示</summary>
+                <div class="detail-view" style="box-shadow:none; padding:0;">
+                  <div class="detail-layout">
+                   <div class="detail-img">
+                      <img src="data:image/jpeg;base64,{{ item.full }}" alt="large" />
+                    </div>
+                    <div class="contrib">
+                      <strong>類似度内訳</strong>
+                      {% for contrib in item.contributions %}
+                        <div>
+                          <div>{{ contrib.label }}: {{ '%.3f'|format(contrib.value) }} ({{ '%.1f'|format(contrib.percent) }}%)</div>
+                          <div class="contrib-bar" style="width: {{ contrib.percent }}%;"></div>
+                        </div>
+                      {% endfor %}
+                      <div style="margin-top:12px;">
+                        <strong>属性 JSON</strong>
+                        <pre>{{ item.attr_json }}</pre>
+                      </div>
+                    </div>
+                  </div>
+                  <div class="quick-actions">
+                    <form action="/search" method="post">
+                      <input type="hidden" name="mode" value="from_image" />
+                      <input type="hidden" name="ref_image_id" value="{{ item.image_id }}" />
+                      <button type="submit">画像類似検索</button>
+                    </form>
+                    {% for key, label in attr_labels.items() %}
+                    <form action="/search" method="post">
+                      <input type="hidden" name="mode" value="from_attr" />
+                      <input type="hidden" name="ref_image_id" value="{{ item.image_id }}" />
+                      <input type="hidden" name="ref_attr_key" value="{{ key }}" />
+                      <button type="submit">{{ label }}類似</button>
+                    </form>
+                    {% endfor %}
+                  </div>
+                </div>
+              </details>
+            </div>
+            {% endfor %}
+          </div>
+        {% endif %}
+      </section>
+    </div>
+  </main>
+</body>
+</html>

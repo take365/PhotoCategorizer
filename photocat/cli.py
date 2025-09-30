@@ -14,8 +14,12 @@ from typing import Any, Iterable, Optional, Sequence
 
 import pandas as pd
 import typer
+import uvicorn
 
 from .color_judge import ColorDecision, judge_color_mode
+from .attr_index import AttributeIndexer, IndexPaths, create_text_client, load_attr_records
+from .attr_poc import ModelSpec, generate_html_report, run_attribute_extraction
+from .server import create_app
 from .gpt import (
     GPTCostEstimate,
     GPTDecision,
@@ -924,6 +928,199 @@ def pixabay_download(
     typer.echo(f"Downloaded {len(downloads)} file(s). Metadata written to {metadata_path}.")
     if total_hits > len(downloads):
         typer.echo("Additional results available. Use --page and --per-page to fetch more.")
+
+
+@app.command("attr-poc")
+def attr_poc(
+    input_dir: Path = typer.Argument(..., exists=True, file_okay=False, resolve_path=True),
+    env_path: Optional[Path] = typer.Option(None, "--env-path", resolve_path=True, help="Path to alternate .env"),
+    limit: int = typer.Option(100, min=1, help="Maximum number of images to process"),
+    out_dir: Path = typer.Option(Path("outputs/attr_poc"), "--out-dir", resolve_path=True),
+    sleep: float = typer.Option(0.0, min=0.0, help="Seconds to sleep between images"),
+    qwen_model: Optional[str] = typer.Option(None, help="Override Qwen model identifier"),
+    gemma_model: Optional[str] = typer.Option(None, help="Override Gemma model identifier"),
+    qwen_base_url: Optional[str] = typer.Option(None, help="Override Qwen server base URL"),
+    gemma_base_url: Optional[str] = typer.Option(None, help="Override Gemma server base URL"),
+    use_qwen: bool = typer.Option(True, "--use-qwen/--no-use-qwen", help="Include Qwen2.5-VL in extraction"),
+    use_gemma: bool = typer.Option(True, "--use-gemma/--no-use-gemma", help="Include Gemma-3 in extraction"),
+) -> None:
+    """Run multi-model attribute extraction PoC and build an HTML comparison report."""
+
+    from openai import OpenAI
+
+    def _client_from_env(prefix: str, override_base: Optional[str]) -> tuple[OpenAI, str]:
+        base_url = (
+            override_base
+            or _load_env_value(f"{prefix}_BASE_URL", env_path)
+            or _load_env_value("LMSTUDIO_BASE_URL", env_path)
+            or "http://127.0.0.1:1234/v1"
+        )
+        api_key = _load_env_value(f"{prefix}_API_KEY", env_path) or _load_env_value("LMSTUDIO_API_KEY", env_path) or "lm-studio"
+        return OpenAI(base_url=base_url, api_key=api_key), base_url
+
+    info_lines: list[str] = []
+    model_specs: list[ModelSpec] = []
+
+    if use_qwen:
+        qwen_client, qwen_url = _client_from_env("QWEN", qwen_base_url)
+        effective_qwen_model = (
+            qwen_model
+            or _load_env_value("QWEN_MODEL", env_path)
+            or _load_env_value("LMSTUDIO_QWEN_MODEL", env_path)
+            or "qwen/qwen2.5-vl-7b"
+        )
+        info_lines.append(f" - Qwen model: {effective_qwen_model} @ {qwen_url}")
+        model_specs.append(
+            ModelSpec(key="qwen", label="Qwen2.5-VL", client=qwen_client, model=effective_qwen_model)
+        )
+
+    if use_gemma:
+        gemma_client, gemma_url = _client_from_env("GEMMA", gemma_base_url)
+        effective_gemma_model = (
+            gemma_model
+            or _load_env_value("GEMMA_MODEL", env_path)
+            or _load_env_value("LMSTUDIO_GEMMA_MODEL", env_path)
+            or "google/gemma-3-12b"
+        )
+        info_lines.append(f" - Gemma model: {effective_gemma_model} @ {gemma_url}")
+        model_specs.append(
+            ModelSpec(key="gemma", label="Gemma-3", client=gemma_client, model=effective_gemma_model)
+        )
+
+    if not model_specs:
+        raise typer.BadParameter(
+            "少なくとも1つのモデルを有効にしてください。",
+            param_hint="--use-qwen/--use-gemma",
+        )
+
+    info_lines.append(f" - Images: {input_dir} (limit={limit})")
+    typer.echo("Running attribute extraction PoC with:\n" + "\n".join(info_lines))
+
+    try:
+        records = run_attribute_extraction(input_dir, model_specs, limit=limit, sleep=sleep)
+    except FileNotFoundError as err:
+        raise typer.BadParameter(str(err), param_hint="input_dir") from err
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    json_path = out_dir / "attr_results.json"
+    html_path = out_dir / "attr_report.html"
+
+    typer.echo(f"Saving structured outputs to {json_path}")
+    json_path.write_text(json.dumps(records, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    typer.echo(f"Rendering HTML comparison to {html_path}")
+    generate_html_report(records, html_path)
+
+    typer.echo("Done. Open the HTML report in a browser to review model outputs.")
+
+
+@app.command("attr-index")
+def attr_index(
+    attr_json: Path = typer.Argument(..., exists=True, dir_okay=False, resolve_path=True),
+    index_dir: Path = typer.Option(Path("outputs/vector_index"), "--index-dir", resolve_path=True),
+    env_path: Optional[Path] = typer.Option(None, "--env-path", resolve_path=True, help="Path to alternate .env"),
+    text_model: Optional[str] = typer.Option(None, help="Embedding model identifier"),
+    text_base_url: Optional[str] = typer.Option(None, help="Embedding server base URL"),
+    text_api_key: Optional[str] = typer.Option(None, help="Embedding server API key"),
+    image_model: str = typer.Option("ViT-B-32", help="OpenCLIP image encoder"),
+    image_pretrained: str = typer.Option("openai", help="Pretrained weights name"),
+    device: str = typer.Option("cpu", help="Torch device for image encoder"),
+    reset: bool = typer.Option(False, help="Reset index directory before ingest"),
+) -> None:
+    """Build FAISS + SQLite indices from attr_poc JSON results."""
+
+    embed_base_url = (
+        text_base_url
+        or _load_env_value("EMBED_BASE_URL", env_path)
+        or _load_env_value("LMSTUDIO_BASE_URL", env_path)
+        or "http://127.0.0.1:1234/v1"
+    )
+    embed_api_key = (
+        text_api_key or _load_env_value("EMBED_API_KEY", env_path) or _load_env_value("LMSTUDIO_API_KEY", env_path) or "lm-studio"
+    )
+    model_name = (
+        text_model
+        or _load_env_value("EMBED_MODEL", env_path)
+        or _load_env_value("LMSTUDIO_EMBED_MODEL", env_path)
+        or "text-embedding-nomic-embed-text-v1.5"
+    )
+
+    client = create_text_client(embed_base_url, embed_api_key)
+    typer.echo(
+        "Building attribute index with:\n"
+        f" - attr JSON: {attr_json}\n"
+        f" - index dir: {index_dir}\n"
+        f" - text model: {model_name}\n"
+        f" - image encoder: {image_model}/{image_pretrained} (device={device})"
+    )
+
+    records = load_attr_records(attr_json)
+    if not records:
+        typer.echo("No records present in attr JSON. Nothing to do.")
+        return
+
+    indexer = AttributeIndexer(
+        IndexPaths(index_dir),
+        text_client=client,
+        text_model=model_name,
+        image_model=image_model,
+        image_pretrained=image_pretrained,
+        device=device,
+    )
+
+    if reset:
+        typer.echo("Resetting index directory…")
+        indexer.reset()
+
+    typer.echo(f"Ingesting {len(records)} records…")
+    indexer.ingest_records(records)
+    typer.echo("Index build completed.")
+
+
+@app.command("attr-serve")
+def attr_serve(
+    index_dir: Path = typer.Option(Path("outputs/vector_index"), "--index-dir", resolve_path=True),
+    env_path: Optional[Path] = typer.Option(None, "--env-path", resolve_path=True, help="Path to alternate .env"),
+    text_model: Optional[str] = typer.Option(None, help="Embedding model identifier"),
+    text_base_url: Optional[str] = typer.Option(None, help="Embedding server base URL"),
+    text_api_key: Optional[str] = typer.Option(None, help="Embedding server API key"),
+    host: str = typer.Option("127.0.0.1", help="Host to bind"),
+    port: int = typer.Option(8000, help="Port to bind"),
+    reload: bool = typer.Option(False, help="Enable auto-reload (development only)"),
+) -> None:
+    """Launch the attribute search web UI."""
+
+    embed_base_url = (
+        text_base_url
+        or _load_env_value("EMBED_BASE_URL", env_path)
+        or _load_env_value("LMSTUDIO_BASE_URL", env_path)
+        or "http://127.0.0.1:1234/v1"
+    )
+    embed_api_key = (
+        text_api_key or _load_env_value("EMBED_API_KEY", env_path) or _load_env_value("LMSTUDIO_API_KEY", env_path) or "lm-studio"
+    )
+    model_name = (
+        text_model
+        or _load_env_value("EMBED_MODEL", env_path)
+        or _load_env_value("LMSTUDIO_EMBED_MODEL", env_path)
+        or "text-embedding-nomic-embed-text-v1.5"
+    )
+
+    typer.echo(
+        "Starting attribute search UI with:\n"
+        f" - index dir: {index_dir}\n"
+        f" - text model: {model_name}\n"
+        f" - base URL: {embed_base_url}\n"
+        f" - host: {host}:{port}"
+    )
+
+    app_instance = create_app(
+        index_dir,
+        embed_base_url=embed_base_url,
+        embed_api_key=embed_api_key,
+        embed_model=model_name,
+    )
+    uvicorn.run(app_instance, host=host, port=port, reload=reload)
 
 
 def main() -> None:
