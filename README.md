@@ -1,93 +1,116 @@
 # PhotoCategorizer
 
-ゼロショット画像分類で `studio/room/city/forest/sea/desert` と `color/mono` を自動推定する CLI ツールです。
+属性テキストと画像ベクトルを組み合わせて大規模な写真コレクションを探索するためのツールキットです。抽出した自然文属性を用いた検索 UI を中心に、語ペア軸の意味マップや UMAP+クラスタマップでコレクション全体を俯瞰できます。
 
-## Setup
+## 主な機能
+
+- **属性検索 UI** – 自然文クエリとタグフィルタを組み合わせて画像を探索。モーダルで詳細と類似検索のショートカットを表示。
+
+- **意味軸マップ** – 任意の語ペアから生成した2軸上にサムネイルを散布。ズーム・パン・詳細ポップアップに対応。
+- **クラスタマップ** – 事前計算した UMAP 座標とクラスタ結果をマップ表示。群の概要、代表画像、意味軸マップへのジャンプを提供。
+- **バッチ属性抽出** – Qwen2.5-VL を想定したローカル推論で location/subject の自然文とタグを抽出。大規模データは `--offset/--limit` で分割処理が可能。
+
+## クイックスタート
+
+### 1. 環境構築
 
 ```bash
-python3 -m venv .venv
+python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-## Classify images
+LM Studio 等でビジョンモデル（例: `qwen/qwen2.5-vl-7b`）を提供し、`.env` か環境変数で `LMSTUDIO_BASE_URL` と `LMSTUDIO_API_KEY` を設定してください。
+
+### 2. 属性抽出（バッチ処理）
+
+`photocat.cli attr-poc` で画像フォルダから属性 JSON を生成します。大規模データはオフセットを変えて繰り返し実行します。
 
 ```bash
-photocat classify ./images --out-csv outputs/pred.csv --out-json outputs/pred.json
+# 例: 1000 枚ずつ 5 バッチに分割
+for i in 0 1000 2000 3000; do
+  venv/bin/python -m photocat.cli attr-poc data/val2017 \
+    --offset "$i" --limit 1000 \
+    --use-qwen --no-use-gemma \
+    --out-dir outputs/attr_poc_batches/batch_$(printf "%04d" "$i")
+done
+
+# 末尾 500 枚など残りは limit を調整
+venv/bin/python -m photocat.cli attr-poc data/val2017 \
+  --offset 4000 --limit 500 \
+  --out-dir outputs/attr_poc_batches/batch_4000
 ```
 
-- `--move-to-class-dirs` を付けると `outputs/classified/{label}/{color}` にファイルを移動します。
-- `--config` で別の YAML 設定ファイルを指定できます。
-
-## Evaluate on labelled set
-
-1. `eval_images/` に評価用画像を配置します。
-2. `labels.csv` を用意し、`filename,label` 形式で保存します。
-3. 次を実行します。
+バッチで生成した `attr_results.json` は次のように統合します。
 
 ```bash
-photocat eval ./eval_images --labels labels.csv --report outputs/report.md
+venv/bin/python - <<'PY'
+import json
+from pathlib import Path
+
+parts = sorted(Path('outputs/attr_poc_batches').glob('batch_*/attr_results.json'))
+records = []
+for path in parts:
+    records.extend(json.loads(path.read_text(encoding='utf-8')))
+
+out = Path('outputs/attr_poc_full/attr_results.json')
+out.parent.mkdir(parents=True, exist_ok=True)
+out.write_text(json.dumps(records, ensure_ascii=False, indent=2), encoding='utf-8')
+print(f'Merged {len(records)} records -> {out}')
+PY
 ```
 
-Markdown のレポートに混同行列と自動確定率が出力されます。
-
-- `--model both` を指定すると SigLIP と OpenCLIP を同時に評価し、結果は `outputs/pred.json` / `outputs/gallery.html` に保存されます。
-- GPT による目視代替判定を追加したい場合は `.env` に `OPENAI_API_KEY` と `BATCH_MODEL` を設定し、`--mode gpt-off`（OpenCLIPのみ）/`--mode gpt-review`（閾値未満のみGPT）/`--mode gptall`（GPT優先）を選択してください。
-- 現在の出力は `outputs/<timestamp>/` 以下にまとめられ、画像ファイルは `color/` / `grayscale/` → `カテゴリ名/` の順に移動されます（HTML も相対パスで閲覧可）。
-- 最終割り振り一覧は `outputs/<timestamp>/summary.csv` と `report.md` に保存されます（CSV には `filename,path,final_label,color_mode` を出力）。
-- 大規模運用で GPT のレート制御が必要な場合は `.env` に `GPT_TPM_LIMIT`（トークン/分）や `GPT_RPM_LIMIT`（リクエスト/分）を設定すると CLI 側で自動的にスロットルします。
-- `.env` では `EVAL_MODE` / `EVAL_MODEL` / `GPT_BATCH_SIZE` / `GPT_RPS` など実行時のデフォルト値も指定できます（CLI で明示した引数が優先されます）。
-
-### .env で設定できる主な項目
-
-- `PIXABAY_API_KEY`, `OPENAI_API_KEY`, `BATCH_MODEL`：外部 API の認証情報と利用モデル名。
-- `EVAL_MODE`：`gpt-off` / `gpt-review` / `gptall` から既定の GPT モードを選択。
-- `EVAL_MODEL`：`openclip` / `both` / `siglip` のいずれかを既定モデルとして使用。
-- `GPT_BATCH_SIZE`, `GPT_RPS`, `GPT_MAX_RETRIES`, `GPT_BACKOFF_BASE`：GPT 呼び出しのバッチサイズや送信レート、リトライ回数、バックオフ初期値を制御。
-- `GPT_TPM_LIMIT`, `GPT_RPM_LIMIT`：組織のレートリミットに合わせた追加ガード。未設定時は CLI オプション値のみで管理。
-- 他にも CLI オプションは `.env` の値で事前設定でき、環境依存の調整を簡素化できます。
-
-### start.bat での一括実行
-
-- Windows 環境では `start.bat` を実行すると `venv_win` の作成・依存関係のインストール・`photocat eval input` の実行まで自動化されます。
-- `.env` に設定した `EVAL_MODE` や GPT 関連のデフォルト値がそのまま適用されるため、バッチを再実行するだけで最新の設定で評価できます。
-
-### 対応ファイル形式
-
-- 入力として扱える拡張子は `.jpg`, `.jpeg`, `.png`, `.webp` の4種類です。
-- `.bmp` は GPT 推論が利用できないためスキップ対象になります（入力フォルダに残り、`report.md` に警告として記録されます）。
-
-### 色判定の調整
-
-- `config.yaml` の `color_judge.threshold` は飽和度平均の閾値（初期値 0.08）です。全体が淡い色調でも平均が閾値を超えれば color と判定されます。
-- `color_judge.pixel_threshold` は「色付きとみなすピクセル」の飽和度閾値（初期値 0.12）で、`min_color_ratio` はその割合が一定以上（初期値 0.02 = 2%）なら色付きとみなす補助判定です。
-- 淡色背景にアクセントカラーがある写真で mono 判定される場合は `min_color_ratio` を下げる、色付きノイズで誤検出する場合は `pixel_threshold` や `min_color_ratio` を上げると調整できます。
-
-### カテゴリ定義の変更
-
-- `config.yaml` の `classes` セクションでクラスとプロンプトを定義しています。
-  ```yaml
-  classes:
-    city:
-      - "a street scene in a city with buildings and roads"
-      - "urban street with traffic and pedestrians"
-  ```
-- クラス名を追加・削除したい場合は、この辞書に項目を追記・削除してください。
-- それぞれのクラスには少なくとも1つのプロンプト文を登録します。`photocat eval` / `photocat classify` 実行時はこの設定ファイルが読み込まれるため、変更後は再実行するだけで新しいカテゴリが反映されます。
-- 別の設定を使いたい場合は `--config PATH/to/config.yaml` を指定して読み込んでください。
-
-## Download sample assets from Pixabay
-
-`.env` に `PIXABAY_API_KEY=...` を記載するか、環境変数で指定した上で次を実行します。
+### 3. インデックス構築
 
 ```bash
-photocat pixabay-download --query "room interior" --preset background --limit 10 --out-dir images/pixabay_samples
+venv/bin/python -m photocat.cli attr-index outputs/attr_poc_full/attr_results.json --reset
 ```
 
-`--preset` で `background` / `icon` / `item` を切り替えられ、パラメータ確認のみなら `--dry-run` を付けてください。
+これにより `outputs/vector_index/` に FAISS インデックス、サムネイル、属性 SQLite が生成されます。
 
-### Windows での対話型ダウンロード
+### 4. （任意）クラスタマップ用の前処理
 
-- `pixabay_fetch.bat` を実行すると、キーワード（日本語入力可）と取得枚数を尋ねるダイアログが表示されます。
-- バッチ内では自動的に `venv_win` を用意し、`photocat pixabay-download` を呼び出して `pixabay/<キーワード>/` 以下に画像と `pixabay_metadata.json` を保存します。
-- 保存先フォルダ名の禁止文字は安全な `_` に置換されるため、Windows でもそのまま利用できます。
+```bash
+venv/bin/python -m photocat.cli cluster-precompute --index-dir outputs/vector_index
+```
+
+`outputs/vector_index/clusters/<mode>/` に UMAP 座標・クラスタラベル・境界ポリゴンが保存され、クラスタマップ画面で利用できます。
+
+### 5. Web UI の起動
+
+```bash
+venv/bin/python -m photocat.cli attr-serve --host 0.0.0.0 --port 8000
+```
+
+ブラウザで `http://localhost:8000` を開き、以下のタブを切り替えて利用します。
+
+- **属性検索** – フリーワードと属性重みの組み合わせ検索、詳細モーダル表示。
+- **意味軸マップ** – 語ペア軸を設定して散布図を生成。ズーム・ドラッグ・詳細表示が可能。
+- **クラスタマップ** – 事前計算した座標を読み込み、クラスタ概要と代表画像を確認。
+
+Windows で UI だけ試す場合は `launch_attr_ui.bat` から同等のコマンドを実行できます。
+
+## ディレクトリ構成（抜粋）
+
+```
+photocat/          # FastAPI サーバーと CLI 実装
+  attr_poc.py      # 属性抽出ワークフロー
+  attr_index.py    # インデックス構築・検索ロジック
+  cluster_precompute.py  # UMAP + クラスタ計算
+templates/         # 属性検索 / 意味軸マップ / クラスタマップの HTML
+outputs/
+  attr_poc_batches/   # バッチごとの属性 JSON
+  attr_poc_full/      # 統合済み属性 JSON
+  vector_index/       # インデックス・サムネイル・クラスタ成果物
+legacy/
+  zero-shot/          # 旧ゼロショット分類バッチ（start.bat など）
+```
+
+## 追加メモ
+
+- 属性抽出プロンプトの仕様やタグ一覧は `docs/属性抽出・検索仕様書.md` を参照してください。
+- クラスタマップ／意味軸マップの UI 仕様は `docs/クラスタマップUI仕様書（UMAP + クラスタリング）.md` と `docs/散布図UI仕様書（語ペア軸ビュー）.md` にまとめています。
+
+## レガシー: ゼロショット分類バッチ
+
+従来の `photocat.cli eval` を Windows バッチで回す仕組みは `legacy/zero-shot/` に移動しました。必要な場合のみ参照してください。
