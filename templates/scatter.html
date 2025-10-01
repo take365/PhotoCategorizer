@@ -1,0 +1,516 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <title>意味軸マップ</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      font-family: "Segoe UI", "Hiragino Sans", system-ui;
+      background: #f4f5f7;
+      color: #1f2933;
+    }
+    body { margin: 0; padding: 0; }
+    header { background: #0f172a; color: #f8fafc; padding: 12px 24px; }
+    nav { display: flex; gap: 16px; }
+    nav a { color: rgba(248, 250, 252, 0.85); text-decoration: none; font-weight: 600; }
+    nav a.active { color: #fff; border-bottom: 2px solid #38bdf8; padding-bottom: 2px; }
+    main { max-width: none; width: 100%; margin: 0; padding: 24px 32px; box-sizing: border-box; }
+    h1 { margin: 0 0 16px; }
+    .layout { display: grid; grid-template-columns: minmax(280px, 320px) minmax(0, 1fr); gap: 24px; align-items: stretch; }
+    @media (max-width: 960px) {
+      .layout { grid-template-columns: 1fr; }
+    }
+    form { background: #fff; border-radius: 12px; padding: 16px; box-shadow: 0 2px 8px rgba(15, 23, 42, 0.12); display: flex; flex-direction: column; gap: 16px; }
+    label { font-size: 14px; font-weight: 600; margin-bottom: 6px; display: block; }
+    select, textarea, input[type="number"] { width: 100%; box-sizing: border-box; font-size: 14px; padding: 8px 10px; border-radius: 8px; border: 1px solid #cbd5e1; }
+    textarea { min-height: 68px; }
+    .axis-block { background: #f1f5f9; border-radius: 10px; padding: 12px; }
+    .axis-block h2 { margin: 0 0 12px; font-size: 15px; }
+    button.primary { background: #2563eb; color: #fff; border: none; border-radius: 8px; padding: 10px 14px; font-weight: 600; cursor: pointer; }
+    button.primary:hover { background: #1e40af; }
+    .scatter-area { position: relative; background: #fff; border-radius: 12px; box-shadow: 0 2px 8px rgba(15, 23, 42, 0.12); padding: 16px; display: flex; flex-direction: column; gap: 12px; min-height: calc(100vh - 200px); }
+    .scatter-controls { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+    .scatter-canvas { position: relative; width: 100%; flex: 1 1 auto; aspect-ratio: 1 / 1; background: #f8fafc; border-radius: 12px; overflow: hidden; border: 1px solid #e2e8f0; cursor: grab; touch-action: none; max-height: calc(100vh - 260px); }
+    @media (max-width: 960px) {
+      .scatter-area { min-height: auto; }
+      .scatter-canvas { aspect-ratio: 1 / 1; min-height: 360px; max-height: none; }
+    }
+    .scatter-canvas.dragging { cursor: grabbing; }
+    .point { position: absolute; border-radius: 10px; box-shadow: 0 2px 6px rgba(15, 23, 42, 0.2); transform: translate(-50%, -50%); cursor: pointer; border: 2px solid transparent; transition: border 0.2s ease; }
+    .point:hover { border-color: #38bdf8; }
+    .summary { font-size: 13px; color: #475569; }
+    .detail-overlay { position: fixed; inset: 0; display: none; align-items: center; justify-content: center; z-index: 2000; }
+    .detail-overlay::before { content: ""; position: absolute; inset: 0; background: rgba(15, 23, 42, 0.55); }
+    .detail-card { position: relative; display: flex; flex-direction: row; gap: 16px; width: min(90vw, 1200px); max-height: 90vh; background: #fff; border-radius: 16px; padding: 20px; box-shadow: 0 20px 40px rgba(15, 23, 42, 0.35); z-index: 2001; }
+    .detail-image-wrapper { flex: 0 0 60%; display: flex; flex-direction: column; align-items: center; gap: 12px; }
+    .detail-image-wrapper img { width: 100%; height: auto; max-height: 70vh; object-fit: contain; border-radius: 12px; background: #0f172a; }
+    .detail-image-wrapper p { margin: 0; font-size: 13px; color: #2563eb; }
+    .detail-info { flex: 1 1 auto; display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+    .detail-info h2 { margin: 0; font-size: 18px; }
+    .detail-info p { margin: 0; font-size: 13px; color: #475569; word-break: break-all; }
+    .detail-fields { display: grid; gap: 12px; }
+    .detail-field h3 { margin: 0 0 4px; font-size: 15px; color: #1f2933; }
+    .detail-field p { margin: 0; font-size: 15px; line-height: 1.6; color: #111827; white-space: pre-wrap; }
+    .detail-meta { display: grid; gap: 8px; font-size: 13px; color: #475569; }
+    .detail-close { position: absolute; top: 12px; right: 12px; background: transparent; border: none; font-size: 24px; line-height: 1; color: #334155; cursor: pointer; }
+    .detail-close:hover { color: #0f172a; }
+    body.modal-open { overflow: hidden; }
+    .axis-summary { font-size: 13px; color: #475569; display: flex; gap: 12px; flex-wrap: wrap; }
+    .loading { font-size: 14px; color: #0f172a; }
+    .error { background: #fee2e2; color: #b91c1c; border: 1px solid #fca5a5; padding: 10px 12px; border-radius: 8px; }
+    button.secondary { background: #e2e8f0; color: #0f172a; border: none; border-radius: 8px; padding: 8px 12px; font-weight: 600; cursor: pointer; }
+    button.secondary:hover { background: #cbd5e1; }
+  </style>
+</head>
+<body>
+  <header>
+    <nav>
+      <a href="/">属性検索</a>
+      <a href="/scatter" class="active">意味軸マップ</a>
+      <a href="/clusters">クラスタマップ</a>
+    </nav>
+  </header>
+  <main>
+    <h1>意味軸マップ</h1>
+    <div class="layout">
+      <form id="axis-form">
+        <div class="axis-block">
+          <h2>X軸</h2>
+          <label for="axis-x-key">属性</label>
+          <select id="axis-x-key" name="axis_x_key">
+            <option value="location" selected>location（ロケーション）</option>
+            <option value="subject">subject（被写体）</option>
+          </select>
+          <label for="axis-x-pos">右側ワード群（改行区切り）</label>
+          <textarea id="axis-x-pos" name="axis_x_pos">{{ default_axis_x.positives_ja }}</textarea>
+          <label for="axis-x-neg">左側ワード群（改行区切り）</label>
+          <textarea id="axis-x-neg" name="axis_x_neg">{{ default_axis_x.negatives_ja }}</textarea>
+        </div>
+        <div class="axis-block">
+          <h2>Y軸</h2>
+          <label for="axis-y-key">属性</label>
+          <select id="axis-y-key" name="axis_y_key">
+            <option value="subject" selected>subject（被写体）</option>
+            <option value="location">location（ロケーション）</option>
+          </select>
+          <label for="axis-y-pos">上側ワード群（改行区切り）</label>
+          <textarea id="axis-y-pos" name="axis_y_pos">{{ default_axis_y.positives_ja }}</textarea>
+          <label for="axis-y-neg">下側ワード群（改行区切り）</label>
+          <textarea id="axis-y-neg" name="axis_y_neg">{{ default_axis_y.negatives_ja }}</textarea>
+        </div>
+        <div>
+          <label for="limit">表示件数</label>
+          <input type="number" id="limit" name="limit" min="10" max="500" value="200" />
+        </div>
+        <div>
+          <label for="scaling">座標の伸縮</label>
+          <select id="scaling" name="scaling">
+            <option value="robust" selected>ロバスト（中央値基準）</option>
+            <option value="none">変換なし</option>
+          </select>
+        </div>
+        <button type="submit" class="primary">散布図を更新</button>
+        <div id="form-error" class="error" style="display:none;"></div>
+      </form>
+
+      <section class="scatter-area">
+        <div class="scatter-controls">
+          <div class="summary" id="summary">結果がここに表示されます。</div>
+          <button type="button" id="reset-view" class="secondary">ビューをリセット</button>
+        </div>
+        <div class="axis-summary" id="axis-summary"></div>
+        <div class="loading" id="loading" style="display:none;">計算中…</div>
+        <div class="scatter-canvas" id="scatter-canvas"></div>
+      </section>
+    </div>
+  </main>
+
+  <div id="detail-overlay" class="detail-overlay" style="display:none;">
+    <div class="detail-card">
+      <button type="button" class="detail-close" id="detail-close">×</button>
+      <div class="detail-image-wrapper">
+        <img id="detail-image" src="" alt="detail" />
+        <p id="detail-status"></p>
+      </div>
+      <div class="detail-info">
+        <h2>選択中の画像</h2>
+        <p id="detail-path"></p>
+        <div class="detail-fields">
+          <div class="detail-field">
+            <h3>ロケーション</h3>
+            <p id="detail-location">(未設定)</p>
+          </div>
+          <div class="detail-field">
+            <h3>被写体</h3>
+            <p id="detail-subject">(未設定)</p>
+          </div>
+        </div>
+        <div class="detail-meta" id="detail-meta"></div>
+      </div>
+    </div>
+  </div>
+  <script>
+    const form = document.getElementById('axis-form');
+    const scatterCanvas = document.getElementById('scatter-canvas');
+    const summary = document.getElementById('summary');
+    const axisSummary = document.getElementById('axis-summary');
+    const loading = document.getElementById('loading');
+    const resetViewButton = document.getElementById('reset-view');
+    const detailOverlay = document.getElementById('detail-overlay');
+    const detailClose = document.getElementById('detail-close');
+    const detailImage = document.getElementById('detail-image');
+    const detailLocation = document.getElementById('detail-location');
+    const detailSubject = document.getElementById('detail-subject');
+    const detailMeta = document.getElementById('detail-meta');
+    const detailStatus = document.getElementById('detail-status');
+    const detailPath = document.getElementById('detail-path');
+    const formError = document.getElementById('form-error');
+
+    let currentPoints = [];
+    let currentMaxAbs = 1;
+    let selectedPoint = null;
+    const jitterCache = new Map();
+    const fullImageCache = new Map();
+
+    const viewState = {
+      zoom: 1,
+      centerX: 0,
+      centerY: 0,
+    };
+    const MIN_ZOOM = 1;
+    const MAX_ZOOM = 6;
+
+    function resetView() {
+      viewState.zoom = 1;
+      viewState.centerX = 0;
+      viewState.centerY = 0;
+      renderScatter();
+    }
+
+    resetViewButton.addEventListener('click', resetView);
+
+    function parseTerms(text) {
+      return text.split(/\n|,/).map(t => t.trim()).filter(Boolean);
+    }
+
+    function pseudoRandom(id) {
+      const x = Math.sin(id * 12.9898) * 43758.5453;
+      return x - Math.floor(x);
+    }
+
+    function getJitter(id) {
+      if (jitterCache.has(id)) {
+        return jitterCache.get(id);
+      }
+      const base = pseudoRandom(id);
+      const angle = base * Math.PI * 2;
+      const radius = 0.5 + 0.5 * pseudoRandom(id * 1.7);
+      const jitter = {
+        x: Math.cos(angle) * radius,
+        y: Math.sin(angle) * radius,
+      };
+      jitterCache.set(id, jitter);
+      return jitter;
+    }
+
+    function clampCenter() {
+      const halfExtent = 1 / viewState.zoom;
+      const limit = 1 - halfExtent;
+      viewState.centerX = Math.max(-limit, Math.min(limit, viewState.centerX));
+      viewState.centerY = Math.max(-limit, Math.min(limit, viewState.centerY));
+    }
+
+    function screenToWorld(px, py) {
+      const halfExtent = 1 / viewState.zoom;
+      const nx = px * 2 - 1;
+      const ny = (1 - py) * 2 - 1;
+      return {
+        x: viewState.centerX + nx * halfExtent,
+        y: viewState.centerY + ny * halfExtent,
+      };
+    }
+
+    function worldToScreen(x, y) {
+      const halfExtent = 1 / viewState.zoom;
+      const nx = (x - viewState.centerX) / halfExtent;
+      const ny = (y - viewState.centerY) / halfExtent;
+      const left = (nx + 1) / 2 * 100;
+      const top = (1 - (ny + 1) / 2) * 100;
+      return { left, top };
+    }
+
+    function openOverlay() {
+      detailOverlay.style.display = 'flex';
+      document.body.classList.add('modal-open');
+    }
+
+    function closeOverlay() {
+      detailOverlay.style.display = 'none';
+      document.body.classList.remove('modal-open');
+      selectedPoint = null;
+    }
+
+    detailClose.addEventListener('click', closeOverlay);
+    detailOverlay.addEventListener('click', (event) => {
+      if (event.target === detailOverlay) {
+        closeOverlay();
+      }
+    });
+
+    document.addEventListener('keydown', (event) => {
+      if (event.key === 'Escape' && detailOverlay.style.display === 'flex') {
+        closeOverlay();
+      }
+    });
+
+    function updateDetailsView(isLoading = false) {
+      if (!selectedPoint) {
+        return;
+      }
+      const point = selectedPoint;
+      const cached = fullImageCache.get(point.image_id);
+      detailImage.src = cached
+        ? `data:image/jpeg;base64,${cached}`
+        : (point.thumbnail ? `data:image/jpeg;base64,${point.thumbnail}` : '');
+      detailStatus.textContent = isLoading ? '画像を読み込み中…' : '';
+      detailPath.textContent = point.image_path || '';
+
+      const attrs = point.attributes || {};
+      detailLocation.textContent = attrs.location ? attrs.location : '(未設定)';
+      detailSubject.textContent = attrs.subject ? attrs.subject : '(未設定)';
+
+      const metaKeys = [
+        { key: 'tone', label: 'トーン' },
+        { key: 'style', label: 'スタイル' },
+        { key: 'composition', label: '構図' },
+      ];
+      const filledMeta = metaKeys
+        .map(({ key, label }) => ({ label, value: attrs[key] }))
+        .filter(item => item.value && item.value.trim() !== '');
+      detailMeta.innerHTML = filledMeta.length
+        ? filledMeta.map(item => `<div><strong>${item.label}</strong>：${item.value}</div>`).join('')
+        : '';
+    }
+
+    function renderScatter() {
+      scatterCanvas.innerHTML = '';
+      if (!currentPoints.length) {
+        summary.textContent = '該当する画像がありません。語句を調整してください。';
+        return;
+      }
+      const jitterStrength = 0.035 / viewState.zoom;
+      const sizeBase = 44;
+      const sizePx = Math.max(20, Math.min(96, sizeBase * Math.pow(viewState.zoom, 0.5)));
+
+      currentPoints.forEach(point => {
+        const node = document.createElement('img');
+        node.src = point.thumbnail ? `data:image/jpeg;base64,${point.thumbnail}` : '';
+        node.className = 'point';
+        const baseX = point.x / currentMaxAbs;
+        const baseY = point.y / currentMaxAbs;
+        const jitter = getJitter(point.image_id);
+        const worldX = baseX + jitter.x * jitterStrength;
+        const worldY = baseY + jitter.y * jitterStrength;
+        const { left, top } = worldToScreen(worldX, worldY);
+        node.style.left = `${left}%`;
+        node.style.top = `${top}%`;
+        node.style.width = `${sizePx}px`;
+        node.style.height = `${sizePx}px`;
+        node.dataset.id = point.image_id;
+        node.addEventListener('click', () => showDetails(point));
+        scatterCanvas.appendChild(node);
+      });
+
+      summary.textContent = `${currentPoints.length} 件を表示中 ｜ ズーム x${viewState.zoom.toFixed(2)}`;
+      updateDetailsView();
+    }
+
+    async function showDetails(point) {
+      selectedPoint = point;
+      openOverlay();
+      updateDetailsView(true);
+      if (fullImageCache.has(point.image_id)) {
+        updateDetailsView(false);
+        return;
+      }
+      try {
+        const response = await fetch(`/scatter/image/${point.image_id}`);
+        if (!response.ok) {
+          throw new Error('画像の取得に失敗しました');
+        }
+        const data = await response.json();
+        if (data && data.image) {
+          fullImageCache.set(point.image_id, data.image);
+        }
+        if (data && data.attributes) {
+          point.attributes = data.attributes;
+          if (selectedPoint && selectedPoint.image_id === point.image_id) {
+            selectedPoint.attributes = data.attributes;
+          }
+        }
+      } catch (error) {
+        console.error(error);
+        detailStatus.textContent = '画像の取得に失敗しました';
+      } finally {
+        updateDetailsView(false);
+      }
+    }
+
+    form.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      formError.style.display = 'none';
+      closeOverlay();
+      loading.style.display = 'block';
+      summary.textContent = '計算中です…';
+      axisSummary.textContent = '';
+      scatterCanvas.innerHTML = '';
+
+      const payload = {
+        axis_x: {
+          key: document.getElementById('axis-x-key').value,
+          positives: parseTerms(document.getElementById('axis-x-pos').value),
+          negatives: parseTerms(document.getElementById('axis-x-neg').value)
+        },
+        axis_y: {
+          key: document.getElementById('axis-y-key').value,
+          positives: parseTerms(document.getElementById('axis-y-pos').value),
+          negatives: parseTerms(document.getElementById('axis-y-neg').value)
+        },
+        limit: parseInt(document.getElementById('limit').value, 10) || 200,
+        scaling: document.getElementById('scaling').value
+      };
+
+      try {
+        const response = await fetch('/scatter/project', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        if (!response.ok) {
+          const err = await response.json();
+          throw new Error(err.detail || '散布図の計算に失敗しました');
+        }
+        const data = await response.json();
+        currentPoints = data.points || [];
+        currentMaxAbs = currentPoints.reduce((acc, p) => Math.max(acc, Math.abs(p.x), Math.abs(p.y)), 0) || 1;
+        jitterCache.clear();
+        if (selectedPoint) {
+          const match = currentPoints.find(p => p.image_id === selectedPoint.image_id);
+          selectedPoint = match || null;
+        }
+        resetView();
+        axisSummary.textContent = `X軸 median=${data.stats.x_median.toFixed(3)} / IQR=${data.stats.x_iqr.toFixed(3)} ｜ Y軸 median=${data.stats.y_median.toFixed(3)} / IQR=${data.stats.y_iqr.toFixed(3)}`;
+      } catch (error) {
+        formError.textContent = error.message;
+        formError.style.display = 'block';
+        summary.textContent = 'エラーが発生しました。';
+      } finally {
+        loading.style.display = 'none';
+      }
+    });
+
+    scatterCanvas.addEventListener('wheel', (event) => {
+      if (!currentPoints.length) {
+        return;
+      }
+      event.preventDefault();
+      const rect = scatterCanvas.getBoundingClientRect();
+      const px = (event.clientX - rect.left) / rect.width;
+      const py = (event.clientY - rect.top) / rect.height;
+      const worldBefore = screenToWorld(px, py);
+      const zoomFactor = event.deltaY < 0 ? 1.2 : 1 / 1.2;
+      const newZoom = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, viewState.zoom * zoomFactor));
+      if (Math.abs(newZoom - viewState.zoom) < 1e-3) {
+        return;
+      }
+      viewState.zoom = newZoom;
+      const halfExtent = 1 / viewState.zoom;
+      const nx = px * 2 - 1;
+      const ny = (1 - py) * 2 - 1;
+      viewState.centerX = worldBefore.x - nx * halfExtent;
+      viewState.centerY = worldBefore.y - ny * halfExtent;
+      clampCenter();
+      renderScatter();
+    }, { passive: false });
+
+    let isPointerDown = false;
+    let isDragging = false;
+    let pointerId = null;
+    let dragStart = { x: 0, y: 0 };
+    let lastPointer = { x: 0, y: 0 };
+
+    scatterCanvas.addEventListener('pointerdown', (event) => {
+      if (event.button !== 0 && event.button !== 1) {
+        return;
+      }
+      isPointerDown = true;
+      isDragging = false;
+      pointerId = event.pointerId;
+      dragStart = { x: event.clientX, y: event.clientY };
+      lastPointer = dragStart;
+    });
+
+    scatterCanvas.addEventListener('pointermove', (event) => {
+      if (!isPointerDown || pointerId !== event.pointerId) {
+        return;
+      }
+      const dxTotal = event.clientX - dragStart.x;
+      const dyTotal = event.clientY - dragStart.y;
+
+      if (!isDragging) {
+        const dragDistance = Math.hypot(dxTotal, dyTotal);
+        if (dragDistance > 4) {
+          isDragging = true;
+          scatterCanvas.classList.add('dragging');
+          scatterCanvas.setPointerCapture(pointerId);
+        } else {
+          return;
+        }
+      }
+
+      const size = scatterCanvas.clientWidth || 1;
+      const dx = event.clientX - lastPointer.x;
+      const dy = event.clientY - lastPointer.y;
+      lastPointer = { x: event.clientX, y: event.clientY };
+      const halfExtent = 1 / viewState.zoom;
+      const worldPerPixel = (halfExtent * 2) / size;
+      viewState.centerX -= dx * worldPerPixel;
+      viewState.centerY += dy * worldPerPixel;
+      clampCenter();
+      renderScatter();
+      event.preventDefault();
+    });
+
+    function endDrag(event) {
+      if (pointerId !== event.pointerId) {
+        return;
+      }
+      if (isDragging) {
+        scatterCanvas.classList.remove('dragging');
+        try {
+          scatterCanvas.releasePointerCapture(pointerId);
+        } catch (_) {
+          /* noop */
+        }
+      }
+      isPointerDown = false;
+      isDragging = false;
+      pointerId = null;
+    }
+
+    scatterCanvas.addEventListener('pointerup', endDrag);
+    scatterCanvas.addEventListener('pointerleave', endDrag);
+    scatterCanvas.addEventListener('pointercancel', endDrag);
+
+    window.addEventListener('resize', () => {
+      renderScatter();
+    });
+
+    // 初回ロードでフォーム送信
+    window.addEventListener('DOMContentLoaded', () => {
+      form.dispatchEvent(new Event('submit'));
+    });
+  </script>
+</body>
+</html>

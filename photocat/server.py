@@ -11,12 +11,15 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, Optional
 
 import numpy as np
-from fastapi import FastAPI, Request, UploadFile
-from fastapi.responses import HTMLResponse
+from fastapi import Body, FastAPI, HTTPException, Query, Request, UploadFile
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
 from PIL import Image
+from pydantic import BaseModel, Field, validator
 
 from .attr_index import ATTR_KEYS, AttributeIndexer, IndexPaths, WeightedResult, create_text_client
+from .cluster_map import CLUSTER_MODES, ClusterDatasetManager
+from .scatter import AxisDefinition, ScatterProjector
 
 ATTR_LABELS = {
     "location": "ロケーション",
@@ -29,6 +32,36 @@ ATTR_LABELS = {
 DEFAULT_TOP_K = 30
 THUMB_SIZE = 260
 FULL_SIZE = 720
+SCATTER_THUMB_SIZE = 96
+CLUSTER_THUMB_SIZE = 96
+
+
+class AxisModel(BaseModel):
+    key: str = Field(example="location")
+    positives: list[str]
+    negatives: list[str]
+
+    @validator("key")
+    def _validate_key(cls, value: str) -> str:  # noqa: N805,N804
+        if value not in ATTR_KEYS:
+            raise ValueError(f"key must be one of: {', '.join(ATTR_KEYS)}")
+        return value
+
+    @validator("positives", "negatives", pre=True, each_item=False)
+    def _clean_terms(cls, value: Iterable[str]) -> list[str]:  # noqa: N805,N804
+        cleaned: list[str] = []
+        for item in value:
+            text = str(item).strip()
+            if text:
+                cleaned.append(text)
+        return cleaned
+
+
+class ScatterRequestModel(BaseModel):
+    axis_x: AxisModel
+    axis_y: AxisModel
+    limit: int = Field(200, ge=10, le=1000)
+    scaling: str = Field("robust")
 
 
 def _default_form_values() -> dict[str, Any]:
@@ -175,6 +208,8 @@ def create_app(
     client = create_text_client(embed_base_url, embed_api_key)
     indexer = AttributeIndexer(index_paths, text_client=client, text_model=embed_model)
     templates = Jinja2Templates(directory=str(Path(__file__).resolve().parent.parent / "templates"))
+    projector = ScatterProjector(indexer)
+    cluster_manager = ClusterDatasetManager(indexer, index_paths.cluster_dir)
 
     app = FastAPI(title="Photo Attribute Search")
 
@@ -271,5 +306,175 @@ def create_app(
         if results and selected is None:
             selected = _select_result(results, None)
         return render(request, form_values, results, selected, elapsed, message)
+
+    @app.get("/scatter", response_class=HTMLResponse)
+    async def scatter_view(request: Request) -> HTMLResponse:
+        context = {
+            "request": request,
+            "default_axis_x": {
+                "key": "location",
+                "positives": "outdoor\nopen air\nlandscape",
+                "negatives": "indoor\nroom interior",
+                "positives_ja": "屋外\n野外\n自然の風景",
+                "negatives_ja": "屋内\n室内",
+            },
+            "default_axis_y": {
+                "key": "subject",
+                "positives": "people\nfamily\nportrait",
+                "negatives": "objects\nstill life",
+                "positives_ja": "人\n家族\n人物",
+                "negatives_ja": "物体\n静物",
+            },
+        }
+        return templates.TemplateResponse("scatter.html", context)
+
+    @app.post("/scatter/project", response_class=JSONResponse)
+    async def scatter_project(payload: ScatterRequestModel = Body(...)) -> JSONResponse:
+        try:
+            axis_x = AxisDefinition(
+                key=payload.axis_x.key,
+                positives=payload.axis_x.positives,
+                negatives=payload.axis_x.negatives,
+            )
+            axis_y = AxisDefinition(
+                key=payload.axis_y.key,
+                positives=payload.axis_y.positives,
+                negatives=payload.axis_y.negatives,
+            )
+            result = projector.project(axis_x, axis_y, limit=payload.limit, scaling=payload.scaling)
+        except ValueError as err:
+            raise HTTPException(status_code=400, detail=str(err)) from err
+        except Exception as err:  # noqa: BLE001
+            raise HTTPException(status_code=500, detail=str(err)) from err
+
+        response_points: list[dict[str, Any]] = []
+        for point in result.points:
+            attrs = indexer.get_attributes(point.image_id)
+            thumb_path = indexer.paths.thumbnail_path(point.image_id)
+            if thumb_path.exists():
+                thumb_b64 = _image_to_base64(str(thumb_path), SCATTER_THUMB_SIZE)
+            else:
+                original = indexer.get_image_path(point.image_id)
+                thumb_b64 = _image_to_base64(str(original), SCATTER_THUMB_SIZE) if original else ""
+            response_points.append(
+                {
+                    "image_id": point.image_id,
+                    "x": point.x,
+                    "y": point.y,
+                    "raw_x": point.raw_x,
+                    "raw_y": point.raw_y,
+                    "magnitude": point.magnitude,
+                    "thumbnail": thumb_b64,
+                    "attributes": attrs,
+                    "image_path": str(indexer.get_image_path(point.image_id) or ""),
+                }
+            )
+
+        payload = {
+            "points": response_points,
+            "stats": result.stats,
+        }
+        return JSONResponse(payload)
+
+    @app.get("/scatter/image/{image_id}", response_class=JSONResponse)
+    async def scatter_image(image_id: int) -> JSONResponse:
+        path = indexer.get_image_path(image_id)
+        if not path or not path.exists():
+            raise HTTPException(status_code=404, detail="画像が見つかりません")
+        image_b64 = _image_to_base64(str(path), FULL_SIZE)
+        attrs = indexer.get_attributes(image_id)
+        return JSONResponse({
+            "image_id": image_id,
+            "image": image_b64,
+            "attributes": attrs,
+            "path": str(path),
+        })
+
+    @app.get("/clusters", response_class=HTMLResponse)
+    async def clusters_view(request: Request) -> HTMLResponse:
+        context = {
+            "request": request,
+            "modes": CLUSTER_MODES,
+            "default_mode": "location",
+        }
+        return templates.TemplateResponse("cluster.html", context)
+
+    @app.get("/clusters/{mode}/meta", response_class=JSONResponse)
+    async def clusters_meta(mode: str) -> JSONResponse:
+        try:
+            payload = cluster_manager.dataset_meta(mode)
+        except FileNotFoundError:
+            raise HTTPException(status_code=404, detail="クラスタデータが見つかりません。") from None
+        except ValueError as err:  # noqa: BLE001
+            raise HTTPException(status_code=400, detail=str(err)) from err
+        return JSONResponse(payload)
+
+    @app.get("/clusters/{mode}/chunks/{chunk}", response_class=JSONResponse)
+    async def clusters_chunk(
+        mode: str,
+        chunk: int,
+        size: int = Query(200, ge=10, le=2000),
+    ) -> JSONResponse:
+        try:
+            payload = cluster_manager.chunk_points(mode, chunk, size)
+        except FileNotFoundError:
+            raise HTTPException(status_code=404, detail="クラスタデータが見つかりません。") from None
+        except ValueError as err:  # noqa: BLE001
+            raise HTTPException(status_code=400, detail=str(err)) from err
+
+        enriched: list[dict[str, Any]] = []
+        for point in payload.get("points", []):
+            image_id = int(point.get("image_id", 0))
+            image_path = indexer.get_image_path(image_id)
+            thumb_path = indexer.paths.thumbnail_path(image_id)
+            if thumb_path.exists():
+                thumb_b64 = _image_to_base64(str(thumb_path), CLUSTER_THUMB_SIZE)
+            elif image_path:
+                thumb_b64 = _image_to_base64(str(image_path), CLUSTER_THUMB_SIZE)
+            else:
+                thumb_b64 = ""
+            attrs = indexer.get_attributes(image_id)
+            enriched.append(
+                {
+                    **point,
+                    "thumbnail": thumb_b64,
+                    "attributes": attrs,
+                    "image_path": str(image_path) if image_path else "",
+                    "color": cluster_manager.cluster_color(int(point.get("cluster_id", -1))),
+                }
+            )
+        payload["points"] = enriched
+        return JSONResponse(payload)
+
+    @app.get("/clusters/{mode}/detail/{cluster_id}", response_class=JSONResponse)
+    async def clusters_detail(mode: str, cluster_id: int) -> JSONResponse:
+        try:
+            detail = cluster_manager.cluster_detail(mode, cluster_id)
+        except FileNotFoundError:
+            raise HTTPException(status_code=404, detail="クラスタデータが見つかりません。") from None
+        except ValueError as err:  # noqa: BLE001
+            raise HTTPException(status_code=400, detail=str(err)) from err
+
+        representatives: list[dict[str, Any]] = []
+        for image_id in detail.pop("representative_image_ids", []):
+            image_path = indexer.get_image_path(image_id)
+            thumb_path = indexer.paths.thumbnail_path(image_id)
+            if thumb_path.exists():
+                thumb_b64 = _image_to_base64(str(thumb_path), THUMB_SIZE)
+            elif image_path:
+                thumb_b64 = _image_to_base64(str(image_path), THUMB_SIZE)
+            else:
+                thumb_b64 = ""
+            attrs = indexer.get_attributes(image_id)
+            representatives.append(
+                {
+                    "image_id": image_id,
+                    "thumbnail": thumb_b64,
+                    "image_path": str(image_path) if image_path else "",
+                    "attributes": attrs,
+                }
+            )
+        detail["representative_images"] = representatives
+        return JSONResponse(detail)
 
     return app

@@ -9,6 +9,7 @@ pillow
 numpy
 pandas
 scikit-learn
+umap-learn
 opencv-python
 PyYAML
 typer[toml]

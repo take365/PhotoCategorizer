@@ -6,6 +6,7 @@ import json
 import math
 import os
 import platform
+import shutil
 import sqlite3
 import time
 from collections import defaultdict
@@ -25,6 +26,29 @@ from .utils import ensure_parent_dir
 
 ATTR_KEYS = ("location", "subject", "tone", "style", "composition")
 DEFAULT_ATTR_TOPK = 200
+
+TAG_LABELS_JA = {
+    "bright": "明るい",
+    "dark": "暗い",
+    "backlit": "逆光",
+    "golden-hour": "夕暮れ／朝焼け",
+    "night": "夜",
+    "warm": "暖色",
+    "cool": "寒色",
+    "neutral": "中立",
+    "monochrome": "白黒",
+    "sepia": "セピア",
+    "cinematic": "映画風",
+    "vintage": "レトロ",
+    "minimal": "ミニマル",
+    "dramatic": "ドラマチック",
+    "close-up": "寄り",
+    "wide": "引き",
+    "top-view": "真上",
+    "low-angle": "ローアングル",
+    "centered": "中央",
+    "thirds": "三分割",
+}
 
 
 @dataclass(slots=True)
@@ -53,6 +77,27 @@ class IndexPaths:
     def image_index_path(self) -> Path:
         return self.root / "images.faiss"
 
+    @property
+    def thumbnail_dir(self) -> Path:
+        return self.root / "thumbnails"
+
+    def thumbnail_path(self, image_id: int) -> Path:
+        return self.thumbnail_dir / f"{image_id}.jpg"
+
+    def attr_embedding_path(self, key: str) -> Path:
+        return self.root / f"attr_{key}_embeddings.npz"
+
+    @property
+    def cluster_dir(self) -> Path:
+        return self.root / "clusters"
+
+    def cluster_mode_dir(self, mode: str) -> Path:
+        return self.cluster_dir / mode
+
+    @property
+    def image_embedding_path(self) -> Path:
+        return self.root / "image_embeddings.npz"
+
 
 class AttributeIndexer:
     """Builds FAISS indices from attribute extraction results."""
@@ -66,6 +111,9 @@ class AttributeIndexer:
         image_model: str = "ViT-B-32",
         image_pretrained: str = "openai",
         device: str = "cpu",
+        thumbnail_size: int = 64,
+        generate_thumbnails: bool = True,
+        save_embeddings: bool = True,
     ) -> None:
         self.paths = paths
         self.text_client = text_client
@@ -80,6 +128,10 @@ class AttributeIndexer:
         self._image_index: faiss.IndexIDMap | None = None
         self._text_dim: int | None = None
         self._image_dim: int | None = None
+        self._thumbnail_size = int(thumbnail_size)
+        self._generate_thumbnails = bool(generate_thumbnails)
+        self._save_embeddings = bool(save_embeddings)
+        self._attr_embedding_cache: dict[str, tuple[np.ndarray, np.ndarray]] = {}
 
     # ------------------------------------------------------------------
     # Setup helpers
@@ -92,6 +144,12 @@ class AttributeIndexer:
                 path.unlink(missing_ok=True)
             if self.paths.sqlite_path.exists():
                 self.paths.sqlite_path.unlink()
+            if self.paths.thumbnail_dir.exists():
+                shutil.rmtree(self.paths.thumbnail_dir, ignore_errors=True)
+            for key in ATTR_KEYS:
+                embed_path = self.paths.attr_embedding_path(key)
+                embed_path.unlink(missing_ok=True)
+        self._attr_embedding_cache.clear()
         ensure_parent_dir(self.paths.sqlite_path)
         with self.sqlite_conn:
             self._create_schema()
@@ -261,11 +319,26 @@ class AttributeIndexer:
     # ------------------------------------------------------------------
     # Public API
 
-    def ingest_records(self, records: Sequence[Mapping[str, object]]) -> None:
+    def ingest_records(
+        self,
+        records: Sequence[Mapping[str, object]],
+        *,
+        attr_keys: Sequence[str] | None = None,
+    ) -> None:
         text_dim = self._text_embedding_dim()
         image_dim = self._image_embedding_dim()
 
-        attr_vectors: dict[str, list[tuple[int, np.ndarray]]] = {key: [] for key in ATTR_KEYS}
+        target_keys = tuple(attr_keys) if attr_keys else ATTR_KEYS
+        normalised_keys = tuple(key.strip() for key in target_keys if key.strip())
+        if not normalised_keys:
+            raise ValueError("attr_keys must contain at least one key")
+
+        allowed_keys = set(ATTR_KEYS)
+        for key in normalised_keys:
+            if key not in allowed_keys:
+                raise ValueError(f"Unsupported attr key: {key}")
+
+        attr_vectors: dict[str, list[tuple[int, np.ndarray]]] = {key: [] for key in normalised_keys}
         image_vectors: list[tuple[int, np.ndarray]] = []
 
         for record in records:
@@ -275,7 +348,7 @@ class AttributeIndexer:
             if not attr_payload:
                 continue
 
-            for key in ATTR_KEYS:
+            for key in normalised_keys:
                 text_value = attr_payload.get(key)
                 if not text_value or not isinstance(text_value, str) or not text_value.strip():
                     continue
@@ -290,16 +363,22 @@ class AttributeIndexer:
                 raise ValueError("Image embedding dimension mismatch")
             image_vectors.append((image_id, image_vector))
 
+            if self._generate_thumbnails:
+                self._save_thumbnail(image_id, image_path)
+
         # Persist to FAISS
         for key, pairs in attr_vectors.items():
             if not pairs:
                 continue
             ids = np.array([pair[0] for pair in pairs], dtype="int64")
             vecs = np.stack([pair[1] for pair in pairs]).astype("float32")
-            faiss.normalize_L2(vecs)
+            vecs_norm = vecs.copy()
+            faiss.normalize_L2(vecs_norm)
             index = self._ensure_attr_index(key, text_dim)
             index.remove_ids(ids)
-            index.add_with_ids(vecs, ids)
+            index.add_with_ids(vecs_norm, ids)
+            if self._save_embeddings:
+                self._write_attr_embeddings(key, ids, vecs_norm)
 
         if image_vectors:
             ids = np.array([pair[0] for pair in image_vectors], dtype="int64")
@@ -318,6 +397,108 @@ class AttributeIndexer:
             faiss.write_index(index, str(self.paths.attribute_index_path(key)))
         if self._image_index is not None:
             faiss.write_index(self._image_index, str(self.paths.image_index_path))
+
+    # ------------------------------------------------------------------
+    # Thumbnail helpers
+
+    def _save_thumbnail(self, image_id: int, image_path: Path) -> None:
+        try:
+            thumb_path = self.paths.thumbnail_path(image_id)
+            ensure_parent_dir(thumb_path)
+            if thumb_path.exists():
+                return
+            with Image.open(image_path) as img:
+                img = img.convert("RGB")
+                img.thumbnail((self._thumbnail_size, self._thumbnail_size))
+                img.save(thumb_path, format="JPEG", quality=80)
+        except Exception:  # noqa: BLE001
+            # サムネ生成失敗時は検索機能に致命的でないためスキップ
+            thumb_path.unlink(missing_ok=True)
+
+    # ------------------------------------------------------------------
+    # Embedding persistence helpers
+
+    def _write_attr_embeddings(self, key: str, ids: np.ndarray, vectors: np.ndarray) -> None:
+        path = self.paths.attr_embedding_path(key)
+        ensure_parent_dir(path)
+        new_ids = ids.astype("int64")
+        new_vecs = vectors.astype("float16")
+
+        combined: dict[int, np.ndarray] = {}
+        if path.exists():
+            try:
+                with np.load(path, allow_pickle=False) as data:
+                    prev_ids = data["ids"].astype("int64")
+                    prev_vecs = data["embeddings"].astype("float16")
+                for prev_id, prev_vec in zip(prev_ids, prev_vecs, strict=False):
+                    combined[int(prev_id)] = prev_vec
+            except Exception:  # noqa: BLE001
+                combined = {}
+
+        for image_id, vec in zip(new_ids, new_vecs, strict=False):
+            combined[int(image_id)] = vec
+
+        ordered_ids = np.array(sorted(combined.keys()), dtype="int64")
+        ordered_vecs = np.stack([combined[idx] for idx in ordered_ids]).astype("float16")
+        np.savez_compressed(path, ids=ordered_ids, embeddings=ordered_vecs)
+        self._attr_embedding_cache[key] = (ordered_ids, ordered_vecs.astype("float32"))
+
+    def load_attr_embeddings(self, key: str) -> tuple[np.ndarray, np.ndarray]:
+        if key not in ATTR_KEYS:
+            raise ValueError(f"Unsupported attr key: {key}")
+        cached = self._attr_embedding_cache.get(key)
+        if cached is not None:
+            ids, vectors = cached
+            return ids.copy(), vectors.copy()
+        path = self.paths.attr_embedding_path(key)
+        if not path.exists():
+            raise FileNotFoundError(f"Attribute embeddings not found for key '{key}'")
+        with np.load(path, allow_pickle=False) as data:
+            ids = data["ids"].astype("int64")
+            vectors = data["embeddings"].astype("float32")
+        self._attr_embedding_cache[key] = (ids, vectors)
+        return ids.copy(), vectors.copy()
+
+    def load_image_embeddings(self) -> tuple[np.ndarray, np.ndarray]:
+        dim = self._image_embedding_dim()
+        index = self._ensure_image_index(dim)
+        ntotal = int(index.ntotal)
+        if ntotal == 0:
+            return np.empty(0, dtype="int64"), np.empty((0, dim), dtype="float32")
+
+        cache_path = self.paths.image_embedding_path
+        if cache_path.exists():
+            with np.load(cache_path, allow_pickle=False) as data:
+                ids = data["ids"].astype("int64")
+                vectors = data["embeddings"].astype("float32")
+            if ids.shape[0] == ntotal:
+                return ids, vectors
+
+        id_map = faiss.vector_to_array(index.id_map).astype("int64")
+        vectors = np.empty((ntotal, dim), dtype="float32")
+
+        reconstruct_supported = hasattr(index, "reconstruct")
+        if reconstruct_supported:
+            try:
+                sample = index.reconstruct(0)
+                if isinstance(sample, np.ndarray) and sample.shape[0] == dim:
+                    vectors[0] = sample.astype("float32")
+                    for row in range(1, ntotal):
+                        vectors[row] = index.reconstruct(row).astype("float32")
+                    np.savez_compressed(cache_path, ids=id_map, embeddings=vectors)
+                    return id_map, vectors
+            except Exception:  # noqa: BLE001 - fallback to re-encoding
+                pass
+
+        # reconstruct() not available → re-encode from original files
+        for pos, image_id in enumerate(id_map):
+            path = self.get_image_path(int(image_id))
+            if not path or not path.exists():
+                raise FileNotFoundError(f"画像ファイルが見つかりません: {image_id}")
+            vector = self.encode_image_path(path)
+            vectors[pos] = vector
+        np.savez_compressed(cache_path, ids=id_map, embeddings=vectors.astype("float32"))
+        return id_map, vectors
 
     # ------------------------------------------------------------------
     # Retrieval helpers
@@ -347,8 +528,37 @@ class AttributeIndexer:
         for candidate in ("qwen", "gemma"):
             payload = record.get(candidate)
             if isinstance(payload, Mapping) and payload.get("ok") and isinstance(payload.get("data"), Mapping):
-                return payload["data"]  # type: ignore[return-value]
+                return self._format_attribute_payload(payload["data"])  # type: ignore[arg-type]
         return None
+
+    def _format_attribute_payload(self, data: Mapping[str, object]) -> Mapping[str, str]:
+        location = str(data.get("location", "")).strip()
+        subject = str(data.get("subject", "")).strip()
+        formatted: dict[str, str] = {
+            "location": location,
+            "subject": subject,
+        }
+
+        tags = data.get("tags")
+        if isinstance(tags, Mapping):
+            for group in ("tone", "style", "composition"):
+                values = tags.get(group, [])
+                if isinstance(values, (list, tuple)):
+                    ja_values = [
+                        TAG_LABELS_JA.get(str(value), str(value))
+                        for value in values
+                        if str(value).strip()
+                    ]
+                    formatted[group] = "、".join(ja_values)
+                elif isinstance(values, str):
+                    formatted[group] = values
+        else:
+            for group in ("tone", "style", "composition"):
+                raw = data.get(group)
+                if raw:
+                    formatted[group] = str(raw)
+
+        return formatted
 
     # ------------------------------------------------------------------
     # Query helpers

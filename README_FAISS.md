@@ -30,7 +30,16 @@
    - 各結果カードの「詳細を表示」内に、属性 JSON、類似度内訳バー、
      「画像類似」「ロケーション類似」などの再検索ボタンを配置。
 
-4. **検索利用例**
+4. **クラスタマップ用の事前計算を実行**
+   ```bash
+   venv/bin/python -m photocat.cli cluster-precompute --index-dir outputs/vector_index
+   ```
+   - location / subject / image の各モードで UMAP + DBSCAN を走らせ、
+     `outputs/vector_index/clusters/<mode>/` に `coords.npy` などを生成。
+   - `--mode location --mode subject` のようにモードを限定することも可能。
+   - `--limit` や `--min-samples` などで前処理パラメータを調整できます。
+
+5. **検索利用例**
    ```python
    from photocat.attr_index import AttributeIndexer, IndexPaths, create_text_client
    paths = IndexPaths(Path('outputs/vector_index'))
@@ -39,7 +48,7 @@
    results = ix.search_attributes('location', '夕暮れの海辺', top_k=5)
    ```
 
-5. **.env 設定の例**
+6. **.env 設定の例**
    ```env
    LMSTUDIO_BASE_URL=http://172.25.192.1:1234/v1
    LMSTUDIO_API_KEY=lm-studio

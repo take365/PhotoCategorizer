@@ -1,0 +1,1011 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <title>クラスタマップ</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      font-family: "Segoe UI", "Hiragino Sans", system-ui;
+      background: #f4f5f7;
+      color: #1f2933;
+    }
+    body { margin: 0; padding: 0; }
+    header { background: #0f172a; color: #f8fafc; padding: 12px 24px; }
+    nav { display: flex; gap: 16px; }
+    nav a { color: rgba(248, 250, 252, 0.85); text-decoration: none; font-weight: 600; }
+    nav a.active { color: #fff; border-bottom: 2px solid #38bdf8; padding-bottom: 2px; }
+    main { width: 100%; margin: 0; padding: 24px 32px; box-sizing: border-box; }
+    h1 { margin: 0 0 16px; }
+    .layout {
+      display: grid;
+      grid-template-columns: minmax(260px, 320px) minmax(0, 1fr) minmax(260px, 340px);
+      gap: 20px;
+      align-items: start;
+    }
+    @media (max-width: 1280px) {
+      .layout {
+        grid-template-columns: minmax(260px, 320px) minmax(0, 1fr);
+        grid-template-areas:
+          "controls controls"
+          "map map"
+          "detail detail";
+      }
+      .controls { grid-area: controls; }
+      .map-panel { grid-area: map; }
+      .detail-panel { grid-area: detail; }
+    }
+    @media (max-width: 860px) {
+      main { padding: 20px; }
+    }
+    .panel {
+      background: #fff;
+      border-radius: 14px;
+      padding: 18px;
+      box-shadow: 0 2px 8px rgba(15, 23, 42, 0.12);
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+    .controls h2,
+    .map-panel h2,
+    .detail-panel h2 { margin: 0; font-size: 18px; }
+    .mode-tabs { display: flex; gap: 8px; flex-wrap: wrap; }
+    .mode-tabs button {
+      border: 1px solid #cbd5e1;
+      background: #f8fafc;
+      color: #1f2933;
+      padding: 8px 12px;
+      border-radius: 20px;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.2s ease;
+    }
+    .mode-tabs button.active {
+      background: #2563eb;
+      border-color: #2563eb;
+      color: #fff;
+      box-shadow: 0 6px 16px rgba(37, 99, 235, 0.35);
+    }
+    label { font-size: 13px; font-weight: 600; display: flex; justify-content: space-between; align-items: center; }
+    input[type="range"] { width: 100%; }
+    .range-value { font-variant-numeric: tabular-nums; font-size: 13px; color: #2563eb; }
+    details { background: #f1f5f9; border-radius: 12px; padding: 12px; }
+    details summary { cursor: pointer; font-weight: 600; font-size: 13px; }
+    details .form-row { display: flex; flex-direction: column; gap: 8px; margin-top: 12px; }
+    details input { padding: 8px 10px; border-radius: 8px; border: 1px solid #cbd5e1; font-size: 13px; }
+    .parameter-note { font-size: 12px; color: #64748b; line-height: 1.5; }
+    .map-panel { gap: 14px; }
+    .map-summary { font-size: 13px; color: #475569; display: flex; flex-wrap: wrap; gap: 12px; }
+    .map-actions { display: flex; gap: 10px; flex-wrap: wrap; }
+    button.secondary {
+      background: #e2e8f0;
+      border: none;
+      color: #0f172a;
+      padding: 8px 14px;
+      border-radius: 8px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    button.secondary:hover { background: #cbd5e1; }
+    .map-canvas {
+      position: relative;
+      width: 100%;
+      aspect-ratio: 1 / 1;
+      border-radius: 14px;
+      border: 1px solid #e2e8f0;
+      background: radial-gradient(circle at center, #f8fafc 0%, #e2e8f0 100%);
+      overflow: hidden;
+      cursor: grab;
+      touch-action: none;
+    }
+    .map-canvas.dragging { cursor: grabbing; }
+    .hull-layer,
+    .points-layer { position: absolute; inset: 0; }
+    svg#hull-layer {
+      width: 100%;
+      height: 100%;
+    }
+    .hull-path {
+      stroke-width: 1.2;
+      stroke-opacity: 0.8;
+      fill-opacity: 0.16;
+    }
+    .points-layer img.point {
+      position: absolute;
+      border-radius: 12px;
+      border: 2px solid transparent;
+      box-shadow: 0 6px 16px rgba(15, 23, 42, 0.2);
+      transform: translate(-50%, -50%);
+      transition: transform 0.18s ease, border 0.18s ease, box-shadow 0.18s ease;
+      cursor: pointer;
+      background: #0f172a;
+    }
+    .points-layer img.point:hover { transform: translate(-50%, -50%) scale(1.12); }
+    .points-layer img.point.selected {
+      border-color: rgba(59, 130, 246, 0.95);
+      box-shadow: 0 10px 24px rgba(37, 99, 235, 0.35);
+      z-index: 20;
+    }
+    .points-layer img.point.highlight {
+      border-color: #f97316;
+      box-shadow: 0 12px 30px rgba(249, 115, 22, 0.35);
+      z-index: 22;
+    }
+    .tooltip {
+      position: absolute;
+      pointer-events: none;
+      padding: 8px 10px;
+      font-size: 12px;
+      background: rgba(15, 23, 42, 0.85);
+      color: #f8fafc;
+      border-radius: 8px;
+      box-shadow: 0 6px 16px rgba(15, 23, 42, 0.45);
+      display: none;
+      z-index: 30;
+      max-width: 220px;
+    }
+    .tooltip h3 { margin: 0 0 4px; font-size: 13px; }
+    .tooltip p { margin: 0; line-height: 1.5; }
+    .detail-panel {
+      position: sticky;
+      top: 24px;
+      max-height: calc(100vh - 80px);
+      overflow: auto;
+    }
+    .detail-panel::-webkit-scrollbar { width: 8px; }
+    .detail-panel::-webkit-scrollbar-thumb { background: rgba(148, 163, 184, 0.7); border-radius: 999px; }
+    .cluster-stats { display: grid; gap: 10px; font-size: 13px; color: #475569; }
+    .cluster-stats strong { color: #1f2937; }
+    .representatives { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); }
+    .representatives img {
+      width: 100%;
+      border-radius: 12px;
+      box-shadow: 0 6px 18px rgba(15, 23, 42, 0.22);
+      cursor: pointer;
+    }
+    .attribute-summary { display: grid; gap: 12px; }
+    .attribute-summary section { background: #f8fafc; border-radius: 12px; padding: 10px 12px; }
+    .attribute-summary h3 { margin: 0 0 6px; font-size: 13px; color: #1f2937; }
+    .attribute-summary ul { margin: 0; padding-left: 20px; font-size: 13px; color: #475569; }
+    .attribute-summary ul li { margin-bottom: 4px; }
+    .quick-actions { display: flex; flex-direction: column; gap: 10px; }
+    .quick-actions button {
+      border: none;
+      border-radius: 10px;
+      padding: 10px 14px;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      background: #2563eb;
+      color: #fff;
+    }
+    .quick-actions button.secondary-action {
+      background: #f97316;
+    }
+    .quick-actions button:disabled {
+      opacity: 0.6;
+      cursor: not-allowed;
+    }
+    .empty-state { text-align: center; padding: 40px 20px; font-size: 14px; color: #64748b; }
+    .status-message {
+      padding: 10px 12px;
+      border-radius: 10px;
+      background: #fee2e2;
+      color: #b91c1c;
+      font-size: 13px;
+    }
+    .hover-card { font-size: 12px; color: #475569; }
+    .loader { font-size: 13px; color: #0f172a; }
+    .detail-card-placeholder {
+      border: 2px dashed #cbd5e1;
+      border-radius: 12px;
+      padding: 18px;
+      text-align: center;
+      color: #64748b;
+      font-size: 13px;
+      line-height: 1.6;
+    }
+    .image-overlay { position: fixed; inset: 0; display: none; align-items: center; justify-content: center; z-index: 2200; }
+    .image-overlay::before { content: ""; position: absolute; inset: 0; background: rgba(15, 23, 42, 0.6); }
+    .image-dialog {
+      position: relative;
+      z-index: 2201;
+      width: min(92vw, 960px);
+      max-height: 92vh;
+      background: #fff;
+      border-radius: 16px;
+      padding: 20px;
+      box-shadow: 0 24px 60px rgba(15, 23, 42, 0.5);
+      display: grid;
+      gap: 16px;
+    }
+    .image-dialog img {
+      width: 100%;
+      max-height: 70vh;
+      object-fit: contain;
+      border-radius: 12px;
+      background: #0f172a;
+    }
+    .image-dialog h3 { margin: 0; font-size: 18px; }
+    .image-dialog p { margin: 0; font-size: 13px; color: #475569; word-break: break-all; }
+    .image-dialog dl { margin: 0; display: grid; gap: 6px; font-size: 13px; color: #1f2937; }
+    .image-dialog dt { font-weight: 700; }
+    .image-dialog dd { margin: 0; color: #475569; }
+    .close-button {
+      position: absolute;
+      top: 12px;
+      right: 12px;
+      border: none;
+      background: transparent;
+      font-size: 24px;
+      color: #334155;
+      cursor: pointer;
+    }
+    .close-button:hover { color: #0f172a; }
+    body.modal-open { overflow: hidden; }
+  </style>
+</head>
+<body>
+  <header>
+    <nav>
+      <a href="/">属性検索</a>
+      <a href="/scatter">意味軸マップ</a>
+      <a href="/clusters" class="active">クラスタマップ</a>
+    </nav>
+  </header>
+  <main>
+    <h1>クラスタマップ</h1>
+    <div class="layout">
+      <section class="controls panel">
+        <h2>表示モード</h2>
+        <div class="mode-tabs" id="mode-tabs"></div>
+        <div>
+          <label for="display-count">
+            表示件数
+            <span class="range-value" id="display-count-value"></span>
+          </label>
+          <input type="range" id="display-count" min="50" max="400" step="50" value="200" />
+        </div>
+        <details>
+          <summary>詳細設定（UMAP / クラスタリング）</summary>
+          <div class="form-row">
+            <label>UMAP近傍数 <input type="number" id="param-neighbors" value="30" min="5" max="100" /></label>
+            <label>min_dist <input type="number" id="param-min-dist" value="0.15" step="0.01" min="0.0" max="1.0" /></label>
+            <label>DBSCAN eps <input type="number" id="param-eps" value="auto" /></label>
+            <label>min_samples <input type="number" id="param-min-samples" value="10" min="1" max="200" /></label>
+          </div>
+          <p class="parameter-note">※ 現在は表示用のみで、パラメータ変更は次回の前処理に反映されます。</p>
+        </details>
+        <div>
+          <h2>データ概要</h2>
+          <div class="cluster-stats" id="meta-summary">
+            <span>読み込み中…</span>
+          </div>
+        </div>
+      </section>
+
+      <section class="map-panel panel">
+        <div class="map-summary" id="map-summary"></div>
+        <div class="map-actions">
+          <button type="button" class="secondary" id="reload-meta">最新情報を取得</button>
+          <button type="button" class="secondary" id="reset-view">表示をリセット</button>
+          <button type="button" class="secondary" id="prev-chunk">前へ</button>
+          <button type="button" class="secondary" id="next-chunk">次へ</button>
+          <span class="hover-card" id="chunk-status"></span>
+        </div>
+        <div class="map-canvas" id="map-canvas">
+          <svg id="hull-layer" class="hull-layer" viewBox="0 0 1000 1000" preserveAspectRatio="none"></svg>
+          <div class="points-layer" id="points-layer"></div>
+          <div class="tooltip" id="point-tooltip"></div>
+        </div>
+        <div id="map-message" class="status-message" style="display:none;"></div>
+      </section>
+
+      <aside class="detail-panel panel" id="detail-panel">
+        <h2>クラスタ詳細</h2>
+        <div id="detail-content" class="detail-card-placeholder">
+          クラスタをクリックすると、代表画像と属性要約が表示されます。
+        </div>
+      </aside>
+    </div>
+  </main>
+
+  <div class="image-overlay" id="image-overlay">
+    <div class="image-dialog">
+      <button type="button" class="close-button" id="overlay-close">×</button>
+      <img id="overlay-image" src="" alt="preview" />
+      <h3 id="overlay-title"></h3>
+      <p id="overlay-path"></p>
+      <dl id="overlay-attributes"></dl>
+    </div>
+  </div>
+
+  <script>
+    const modes = {{ modes | tojson }};
+    const defaultMode = "{{ default_mode }}";
+
+    const modeTabs = document.getElementById('mode-tabs');
+    const displayCount = document.getElementById('display-count');
+    const displayCountValue = document.getElementById('display-count-value');
+    const reloadMetaButton = document.getElementById('reload-meta');
+    const resetViewButton = document.getElementById('reset-view');
+    const prevChunkButton = document.getElementById('prev-chunk');
+    const nextChunkButton = document.getElementById('next-chunk');
+    const chunkStatus = document.getElementById('chunk-status');
+    const mapSummary = document.getElementById('map-summary');
+    const mapMessage = document.getElementById('map-message');
+    const metaSummary = document.getElementById('meta-summary');
+    const mapCanvas = document.getElementById('map-canvas');
+    const hullLayer = document.getElementById('hull-layer');
+    const pointsLayer = document.getElementById('points-layer');
+    const tooltip = document.getElementById('point-tooltip');
+    const detailContent = document.getElementById('detail-content');
+    const imageOverlay = document.getElementById('image-overlay');
+    const overlayImage = document.getElementById('overlay-image');
+    const overlayTitle = document.getElementById('overlay-title');
+    const overlayPath = document.getElementById('overlay-path');
+    const overlayAttributes = document.getElementById('overlay-attributes');
+    const overlayClose = document.getElementById('overlay-close');
+
+    const state = {
+      mode: defaultMode,
+      meta: null,
+      bounds: null,
+      points: [],
+      chunk: 0,
+      chunkSize: parseInt(displayCount.value, 10),
+      totalChunks: 0,
+      hoverPoint: null,
+      selectedCluster: null,
+      clusterDetail: null,
+      isLoading: false,
+      jitterCache: new Map(),
+      fullImageCache: new Map(),
+    };
+
+    const viewState = {
+      zoom: 1,
+      centerX: 0,
+      centerY: 0,
+    };
+
+    const MIN_ZOOM = 1;
+    const MAX_ZOOM = 8;
+
+    function pseudoRandom(seed) {
+      const x = Math.sin(seed * 12.9898) * 43758.5453;
+      return x - Math.floor(x);
+    }
+
+    function getJitter(id) {
+      if (state.jitterCache.has(id)) {
+        return state.jitterCache.get(id);
+      }
+      const base = pseudoRandom(id);
+      const angle = base * Math.PI * 2;
+      const radius = 0.35 + 0.65 * pseudoRandom(id * 1.7);
+      const jitter = {
+        x: Math.cos(angle) * radius,
+        y: Math.sin(angle) * radius,
+      };
+      state.jitterCache.set(id, jitter);
+      return jitter;
+    }
+
+    function updateDisplayCountValue() {
+      displayCountValue.textContent = `${state.chunkSize} 件`;
+    }
+
+    function setMessage(message, isError = false) {
+      if (!message) {
+        mapMessage.style.display = 'none';
+        return;
+      }
+      mapMessage.textContent = message;
+      mapMessage.style.display = 'block';
+      mapMessage.style.background = isError ? '#fee2e2' : '#ecfeff';
+      mapMessage.style.color = isError ? '#b91c1c' : '#0f172a';
+    }
+
+    function clampCenter() {
+      const halfExtent = 1 / viewState.zoom;
+      const limit = 1 - halfExtent;
+      viewState.centerX = Math.max(-limit, Math.min(limit, viewState.centerX));
+      viewState.centerY = Math.max(-limit, Math.min(limit, viewState.centerY));
+    }
+
+    function projectToWorld(x, y) {
+      if (!state.bounds) {
+        return { x: 0, y: 0 };
+      }
+      const scale = state.bounds.scale || 1;
+      const nx = (x - state.bounds.centerX) / scale;
+      const ny = (y - state.bounds.centerY) / scale;
+      return { x: nx, y: ny };
+    }
+
+    function worldToScreen(x, y) {
+      const halfExtent = 1 / viewState.zoom;
+      const nx = (x - viewState.centerX) / halfExtent;
+      const ny = (y - viewState.centerY) / halfExtent;
+      const left = ((nx + 1) / 2) * 100;
+      const top = (1 - (ny + 1) / 2) * 100;
+      return { left, top };
+    }
+
+    function screenToWorld(px, py) {
+      const halfExtent = 1 / viewState.zoom;
+      const nx = px * 2 - 1;
+      const ny = (1 - py) * 2 - 1;
+      return {
+        x: viewState.centerX + nx * halfExtent,
+        y: viewState.centerY + ny * halfExtent,
+      };
+    }
+
+    function resetView() {
+      viewState.zoom = 1;
+      viewState.centerX = 0;
+      viewState.centerY = 0;
+      renderMap();
+    }
+
+    resetViewButton.addEventListener('click', resetView);
+
+    function renderModeTabs() {
+      modeTabs.innerHTML = '';
+      modes.forEach(mode => {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.textContent = mode === 'location' ? 'ロケーション' : mode === 'subject' ? '被写体' : '画像';
+        if (mode === state.mode) {
+          button.classList.add('active');
+        }
+        button.addEventListener('click', () => {
+          if (state.mode === mode) {
+            return;
+          }
+          state.mode = mode;
+          state.chunk = 0;
+          state.selectedCluster = null;
+          state.clusterDetail = null;
+          state.jitterCache.clear();
+          document.querySelectorAll('.mode-tabs button').forEach(btn => btn.classList.remove('active'));
+          button.classList.add('active');
+          loadMeta();
+        });
+        modeTabs.appendChild(button);
+      });
+    }
+
+    function formatPercent(value) {
+      return `${(value * 100).toFixed(1)}%`;
+    }
+
+    function renderMeta(meta) {
+      if (!meta || meta.total === 0) {
+        metaSummary.innerHTML = '<span>データが見つかりません。</span>';
+        return;
+      }
+      const lines = [
+        `<div><strong>総画像数</strong>：${meta.total.toLocaleString()}</div>`,
+        `<div><strong>クラスタ数</strong>：${meta.cluster_count}</div>`,
+        `<div><strong>ノイズ率</strong>：${formatPercent(meta.noise_ratio)}</div>`,
+      ];
+      if (meta.params && Object.keys(meta.params).length) {
+        lines.push(`<div><strong>パラメータ</strong>：<code>${JSON.stringify(meta.params)}</code></div>`);
+      }
+      metaSummary.innerHTML = lines.join('');
+    }
+
+    function renderSummary() {
+      if (!state.meta) {
+        mapSummary.textContent = 'メタ情報を取得中…';
+        return;
+      }
+      const clusterCount = state.meta.cluster_count;
+      const total = state.meta.total;
+      const noiseRatio = state.meta.noise_ratio;
+      const chunkInfo = `${state.chunk + 1} / ${state.totalChunks || 1}`;
+      mapSummary.innerHTML = `
+        <span>モード：${state.mode === 'location' ? 'ロケーション' : state.mode === 'subject' ? '被写体' : '画像'}</span>
+        <span>クラスタ数：${clusterCount}</span>
+        <span>ノイズ率：${formatPercent(noiseRatio)}</span>
+        <span>現在のチャンク：${chunkInfo}</span>
+        <span>表示件数：${state.points.length} / ${total}</span>
+      `;
+      chunkStatus.textContent = `${chunkInfo}`;
+    }
+
+    function drawHulls() {
+      hullLayer.innerHTML = '';
+      if (!state.meta || !state.meta.hulls) {
+        return;
+      }
+      const ns = 'http://www.w3.org/2000/svg';
+      const toPath = (coords) => coords.map(([x, y]) => {
+        const world = projectToWorld(x, y);
+        const screen = worldToScreen(world.x, world.y);
+        const px = (screen.left / 100) * 1000;
+        const py = (screen.top / 100) * 1000;
+        return `${px.toFixed(1)},${py.toFixed(1)}`;
+      }).join(' ');
+
+      state.meta.hulls.forEach(hull => {
+        const geometry = hull.geometry || {};
+        const color = hull.color || 'rgba(59,130,246,0.2)';
+        const type = geometry.type;
+        const coords = geometry.coordinates;
+        if (!type || !coords) {
+          return;
+        }
+        if (type === 'Polygon') {
+          coords.forEach(ring => {
+            const path = document.createElementNS(ns, 'polygon');
+            path.setAttribute('points', toPath(ring));
+            path.setAttribute('class', 'hull-path');
+            path.setAttribute('fill', color);
+            path.setAttribute('stroke', color);
+            hullLayer.appendChild(path);
+          });
+        } else if (type === 'MultiPolygon') {
+          coords.forEach(poly => {
+            poly.forEach(ring => {
+              const path = document.createElementNS(ns, 'polygon');
+              path.setAttribute('points', toPath(ring));
+              path.setAttribute('class', 'hull-path');
+              path.setAttribute('fill', color);
+              path.setAttribute('stroke', color);
+              hullLayer.appendChild(path);
+            });
+          });
+        }
+      });
+    }
+
+    function buildTooltipHTML(point) {
+      const attrs = point.attributes || {};
+      const attrLines = [];
+      if (attrs.location) attrLines.push(`ロケーション：${attrs.location}`);
+      if (attrs.subject) attrLines.push(`被写体：${attrs.subject}`);
+      return `
+        <h3>クラスタ ${point.cluster_id}</h3>
+        <p>${attrLines.join('<br/>')}</p>
+      `;
+    }
+
+    function showTooltip(point, event) {
+      if (!point) {
+        tooltip.style.display = 'none';
+        return;
+      }
+      tooltip.innerHTML = buildTooltipHTML(point);
+      tooltip.style.display = 'block';
+      const rect = mapCanvas.getBoundingClientRect();
+      const x = event.clientX - rect.left + 12;
+      const y = event.clientY - rect.top + 12;
+      tooltip.style.left = `${x}px`;
+      tooltip.style.top = `${y}px`;
+    }
+
+    function hideTooltip() {
+      tooltip.style.display = 'none';
+      state.hoverPoint = null;
+    }
+
+    function renderPoints() {
+      pointsLayer.innerHTML = '';
+      if (!state.points.length) {
+        setMessage('該当データがありません。', false);
+        return;
+      }
+      setMessage('', false);
+      const sizeBase = 46;
+      const sizePx = Math.max(24, Math.min(110, sizeBase * Math.pow(viewState.zoom, 0.5)));
+      const jitterStrength = 0.04 / viewState.zoom;
+
+      state.points.forEach(point => {
+        const jitter = getJitter(point.image_id);
+        const world = projectToWorld(point.x, point.y);
+        const jittered = {
+          x: world.x + jitter.x * jitterStrength,
+          y: world.y + jitter.y * jitterStrength,
+        };
+        const screen = worldToScreen(jittered.x, jittered.y);
+        if (screen.left < -20 || screen.left > 120 || screen.top < -20 || screen.top > 120) {
+          return;
+        }
+        const node = document.createElement('img');
+        node.className = 'point';
+        node.src = point.thumbnail ? `data:image/jpeg;base64,${point.thumbnail}` : '';
+        node.style.left = `${screen.left}%`;
+        node.style.top = `${screen.top}%`;
+        node.style.width = `${sizePx}px`;
+        node.style.height = `${sizePx}px`;
+        node.dataset.imageId = point.image_id;
+        node.dataset.clusterId = point.cluster_id;
+        node.style.borderColor = point.color || 'transparent';
+
+        if (state.selectedCluster !== null && point.cluster_id === state.selectedCluster) {
+          node.classList.add('selected');
+        }
+
+        node.addEventListener('pointerenter', (event) => {
+          state.hoverPoint = point;
+          showTooltip(point, event);
+        });
+        node.addEventListener('pointermove', (event) => {
+          if (state.hoverPoint && state.hoverPoint.image_id === point.image_id) {
+            showTooltip(point, event);
+          }
+        });
+        node.addEventListener('pointerleave', () => {
+          hideTooltip();
+        });
+        node.addEventListener('click', () => {
+          selectCluster(point.cluster_id);
+        });
+        node.addEventListener('dblclick', () => {
+          openImageOverlay(point.image_id);
+        });
+        pointsLayer.appendChild(node);
+      });
+    }
+
+    function renderMap() {
+      renderPoints();
+      drawHulls();
+      renderSummary();
+    }
+
+    async function loadMeta(isRefresh = false) {
+      mapSummary.textContent = 'メタ情報を取得中…';
+      setMessage(isRefresh ? '最新情報を取得しています…' : '読み込み中…', false);
+      try {
+        const response = await fetch(`/clusters/${state.mode}/meta`);
+        if (!response.ok) {
+          throw new Error('クラスタ情報の取得に失敗しました');
+        }
+        const data = await response.json();
+        state.meta = data;
+        const minX = data.bounds?.min_x ?? -1;
+        const maxX = data.bounds?.max_x ?? 1;
+        const minY = data.bounds?.min_y ?? -1;
+        const maxY = data.bounds?.max_y ?? 1;
+        const centerX = (minX + maxX) / 2;
+        const centerY = (minY + maxY) / 2;
+        const extentX = Math.max(maxX - minX, 1e-6);
+        const extentY = Math.max(maxY - minY, 1e-6);
+        const scale = Math.max(extentX, extentY) / 2;
+        state.bounds = { minX, maxX, minY, maxY, centerX, centerY, extentX, extentY, scale };
+        renderMeta(data);
+        await loadChunk(0);
+      } catch (error) {
+        console.error(error);
+        setMessage(error.message || 'メタ情報の取得に失敗しました', true);
+        mapSummary.textContent = 'メタ情報の取得に失敗しました';
+        metaSummary.innerHTML = '<span>エラーが発生しました。</span>';
+      }
+    }
+
+    async function loadChunk(chunkIndex) {
+      state.chunk = Math.max(0, chunkIndex);
+      state.chunkSize = parseInt(displayCount.value, 10) || 200;
+      const url = `/clusters/${state.mode}/chunks/${state.chunk}?size=${state.chunkSize}`;
+      setMessage('チャンクを読み込み中…', false);
+      try {
+        const response = await fetch(url);
+        if (!response.ok) {
+          const err = await response.json().catch(() => ({}));
+          throw new Error(err.detail || 'チャンクの取得に失敗しました');
+        }
+        const data = await response.json();
+        state.points = data.points || [];
+        state.totalChunks = data.total_chunks || 1;
+        state.chunk = data.chunk || 0;
+        state.jitterCache.clear();
+        renderMap();
+        setMessage('', false);
+      } catch (error) {
+        console.error(error);
+        setMessage(error.message || '表示データの取得に失敗しました', true);
+        pointsLayer.innerHTML = '';
+      }
+    }
+
+    async function loadClusterDetail(clusterId) {
+      setDetailLoading(clusterId);
+      try {
+        const response = await fetch(`/clusters/${state.mode}/detail/${clusterId}`);
+        if (!response.ok) {
+          const err = await response.json().catch(() => ({}));
+          throw new Error(err.detail || 'クラスタ詳細の取得に失敗しました');
+        }
+        const data = await response.json();
+        state.clusterDetail = data;
+        renderClusterDetail();
+      } catch (error) {
+        console.error(error);
+        detailContent.innerHTML = `<div class="status-message">${error.message || '詳細取得に失敗しました'}</div>`;
+      }
+    }
+
+    function setDetailLoading(clusterId) {
+      detailContent.innerHTML = `<div class="loader">クラスタ ${clusterId} の情報を読み込み中…</div>`;
+    }
+
+    function selectCluster(clusterId) {
+      state.selectedCluster = clusterId;
+      loadClusterDetail(clusterId);
+      const nodes = pointsLayer.querySelectorAll('.point');
+      nodes.forEach(node => {
+        const cid = Number(node.dataset.clusterId);
+        if (cid === clusterId) {
+          node.classList.add('selected');
+        } else {
+          node.classList.remove('selected');
+        }
+      });
+    }
+
+    function renderClusterDetail() {
+      const detail = state.clusterDetail;
+      if (!detail) {
+        detailContent.innerHTML = '<div class="detail-card-placeholder">クラスタをクリックしてください。</div>';
+        return;
+      }
+      const countText = `${detail.count.toLocaleString()} 枚 (${formatPercent(detail.ratio)})`;
+      const densityText = detail.is_noise ? 'ノイズクラスタ' : detail.density.toFixed(3);
+      const attrSections = Object.entries(detail.attribute_summary || {})
+        .filter(([key]) => key !== 'keywords')
+        .map(([key, values]) => {
+          const label = key === 'location' ? 'ロケーション' : key === 'subject' ? '被写体' : key === 'tone' ? 'トーン' : key === 'style' ? 'スタイル' : key === 'composition' ? '構図' : key;
+          const items = (values || []).map((value) => `<li>${value}</li>`).join('');
+          return `<section><h3>${label}</h3><ul>${items || '<li>(該当なし)</li>'}</ul></section>`;
+        }).join('');
+      const keywords = (detail.attribute_summary?.keywords || []).slice(0, 10).join(' / ');
+      const reps = (detail.representative_images || []).map(item => `
+        <figure>
+          <img src="data:image/jpeg;base64,${item.thumbnail}" alt="代表画像" data-image-id="${item.image_id}" />
+        </figure>
+      `).join('');
+      detailContent.innerHTML = `
+        <div class="cluster-stats">
+          <div><strong>クラスタID</strong>：${detail.cluster_id}</div>
+          <div><strong>件数</strong>：${countText}</div>
+          <div><strong>密度指標</strong>：${densityText}</div>
+          <div><strong>キーワード</strong>：${keywords || '―'}</div>
+        </div>
+        <div>
+          <h3>代表画像</h3>
+          <div class="representatives">${reps || '<div class="empty-state">代表画像が取得できませんでした。</div>'}</div>
+        </div>
+        <div class="attribute-summary">${attrSections || '<section><h3>属性要約</h3><p>情報がありません。</p></section>'}</div>
+        <div class="quick-actions">
+          <button type="button" id="action-search">この群で検索</button>
+          <button type="button" class="secondary-action" id="action-semantic">意味軸マップで表示</button>
+        </div>
+      `;
+
+      detailContent.querySelectorAll('.representatives img').forEach(img => {
+        img.addEventListener('click', () => {
+          const imageId = Number(img.dataset.imageId);
+          if (Number.isFinite(imageId)) {
+            openImageOverlay(imageId);
+          }
+        });
+      });
+
+      const searchButton = document.getElementById('action-search');
+      const semanticButton = document.getElementById('action-semantic');
+      if (searchButton) {
+        searchButton.addEventListener('click', () => {
+          if (!state.clusterDetail) return;
+          const words = (state.clusterDetail.attribute_summary?.keywords || []).slice(0, 4);
+          const query = words.join(' ');
+          if (!query) {
+            alert('検索語が生成できませんでした');
+            return;
+          }
+          const url = `/?general_query=${encodeURIComponent(query)}`;
+          window.open(url, '_blank');
+        });
+      }
+      if (semanticButton) {
+        semanticButton.addEventListener('click', () => {
+          if (!state.clusterDetail) return;
+          const keywords = (state.clusterDetail.attribute_summary?.keywords || []).slice(0, 4);
+          const yWords = (state.clusterDetail.attribute_summary?.subject || []);
+          const xWords = (state.clusterDetail.attribute_summary?.location || []);
+          const params = new URLSearchParams();
+          if (xWords.length) {
+            params.set('axis_x_positives', xWords.join('\n'));
+          }
+          if (keywords.length) {
+            params.set('axis_y_positives', keywords.join('\n'));
+          }
+          const url = `/scatter?${params.toString()}`;
+          window.open(url, '_blank');
+        });
+      }
+    }
+
+    async function openImageOverlay(imageId) {
+      if (state.fullImageCache.has(imageId)) {
+        populateOverlay(imageId, state.fullImageCache.get(imageId));
+        return;
+      }
+      try {
+        const response = await fetch(`/scatter/image/${imageId}`);
+        if (!response.ok) {
+          throw new Error('画像取得に失敗しました');
+        }
+        const data = await response.json();
+        state.fullImageCache.set(imageId, data);
+        populateOverlay(imageId, data);
+      } catch (error) {
+        console.error(error);
+        alert('画像の読み込みに失敗しました');
+      }
+    }
+
+    function populateOverlay(imageId, data) {
+      if (!data) return;
+      overlayImage.src = data.image ? `data:image/jpeg;base64,${data.image}` : '';
+      overlayTitle.textContent = `画像 ID：${imageId}`;
+      overlayPath.textContent = data.path || '';
+      overlayAttributes.innerHTML = '';
+      const attrs = data.attributes || {};
+      Object.entries(attrs).forEach(([key, value]) => {
+        const dt = document.createElement('dt');
+        dt.textContent = key === 'location' ? 'ロケーション' : key === 'subject' ? '被写体' : key;
+        const dd = document.createElement('dd');
+        dd.textContent = value;
+        overlayAttributes.appendChild(dt);
+        overlayAttributes.appendChild(dd);
+      });
+      imageOverlay.style.display = 'flex';
+      document.body.classList.add('modal-open');
+    }
+
+    function closeOverlay() {
+      imageOverlay.style.display = 'none';
+      document.body.classList.remove('modal-open');
+    }
+
+    overlayClose.addEventListener('click', closeOverlay);
+    imageOverlay.addEventListener('click', (event) => {
+      if (event.target === imageOverlay) {
+        closeOverlay();
+      }
+    });
+
+    let isPointerDown = false;
+    let isDragging = false;
+    let pointerId = null;
+    let dragStart = { x: 0, y: 0 };
+    let lastPointer = { x: 0, y: 0 };
+
+    mapCanvas.addEventListener('pointerdown', (event) => {
+      if (event.button !== 0 && event.button !== 1) {
+        return;
+      }
+      isPointerDown = true;
+      isDragging = false;
+      pointerId = event.pointerId;
+      dragStart = { x: event.clientX, y: event.clientY };
+      lastPointer = dragStart;
+    });
+
+    mapCanvas.addEventListener('pointermove', (event) => {
+      if (!isPointerDown || pointerId !== event.pointerId) {
+        return;
+      }
+      const dxTotal = event.clientX - dragStart.x;
+      const dyTotal = event.clientY - dragStart.y;
+      if (!isDragging) {
+        const dragDistance = Math.hypot(dxTotal, dyTotal);
+        if (dragDistance > 4) {
+          isDragging = true;
+          mapCanvas.classList.add('dragging');
+          mapCanvas.setPointerCapture(pointerId);
+        } else {
+          return;
+        }
+      }
+      const size = mapCanvas.clientWidth || 1;
+      const dx = event.clientX - lastPointer.x;
+      const dy = event.clientY - lastPointer.y;
+      lastPointer = { x: event.clientX, y: event.clientY };
+      const halfExtent = 1 / viewState.zoom;
+      const worldPerPixel = (halfExtent * 2) / size;
+      viewState.centerX -= dx * worldPerPixel;
+      viewState.centerY += dy * worldPerPixel;
+      clampCenter();
+      renderMap();
+      event.preventDefault();
+    });
+
+    function endDrag(event) {
+      if (pointerId !== event.pointerId) {
+        return;
+      }
+      if (isDragging) {
+        mapCanvas.classList.remove('dragging');
+        try {
+          mapCanvas.releasePointerCapture(pointerId);
+        } catch (_) {
+        }
+      }
+      isPointerDown = false;
+      isDragging = false;
+      pointerId = null;
+    }
+
+    mapCanvas.addEventListener('pointerup', endDrag);
+    mapCanvas.addEventListener('pointerleave', endDrag);
+    mapCanvas.addEventListener('pointercancel', endDrag);
+
+    mapCanvas.addEventListener('wheel', (event) => {
+      if (!state.points.length) {
+        return;
+      }
+      event.preventDefault();
+      const rect = mapCanvas.getBoundingClientRect();
+      const px = (event.clientX - rect.left) / rect.width;
+      const py = (event.clientY - rect.top) / rect.height;
+      const worldBefore = screenToWorld(px, py);
+      const zoomFactor = event.deltaY < 0 ? 1.25 : 1 / 1.25;
+      const newZoom = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, viewState.zoom * zoomFactor));
+      if (Math.abs(newZoom - viewState.zoom) < 1e-3) {
+        return;
+      }
+      viewState.zoom = newZoom;
+      const halfExtent = 1 / viewState.zoom;
+      const nx = px * 2 - 1;
+      const ny = (1 - py) * 2 - 1;
+      viewState.centerX = worldBefore.x - nx * halfExtent;
+      viewState.centerY = worldBefore.y - ny * halfExtent;
+      clampCenter();
+      renderMap();
+    }, { passive: false });
+
+    displayCount.addEventListener('input', () => {
+      state.chunkSize = parseInt(displayCount.value, 10) || 200;
+      updateDisplayCountValue();
+    });
+
+    displayCount.addEventListener('change', () => {
+      loadChunk(0);
+    });
+
+    reloadMetaButton.addEventListener('click', () => {
+      loadMeta(true);
+    });
+
+    prevChunkButton.addEventListener('click', () => {
+      const nextIndex = Math.max(0, state.chunk - 1);
+      if (nextIndex !== state.chunk) {
+        loadChunk(nextIndex);
+      }
+    });
+
+    nextChunkButton.addEventListener('click', () => {
+      const nextIndex = Math.min(state.totalChunks - 1, state.chunk + 1);
+      if (nextIndex !== state.chunk) {
+        loadChunk(nextIndex);
+      }
+    });
+
+    window.addEventListener('resize', () => {
+      renderMap();
+    });
+
+    renderModeTabs();
+    updateDisplayCountValue();
+    loadMeta();
+  </script>
+</body>
+</html>

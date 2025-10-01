@@ -2,7 +2,7 @@
 <html lang="ja">
 <head>
   <meta charset="utf-8" />
-  <title>マルチ属性画像検索</title>
+  <title>属性検索</title>
   <style>
     :root {
       color-scheme: light dark;
@@ -11,13 +11,14 @@
       color: #1e1f21;
     }
     body { margin: 0; padding: 0; }
-    main { max-width: 1200px; margin: 0 auto; padding: 24px; }
+    main { max-width: none; width: 100%; margin: 0; padding: 24px 32px; box-sizing: border-box; }
     h1 { margin-bottom: 1.2rem; }
-    .layout { display: grid; grid-template-columns: 1fr; gap: 24px; }
-    @media (min-width: 960px) {
-      .layout { grid-template-columns: 340px 1fr; }
+    .layout { display: grid; grid-template-columns: minmax(280px, 340px) minmax(0, 1fr); gap: 24px; align-items: start; }
+    @media (max-width: 960px) {
+      .layout { grid-template-columns: 1fr; }
+      form.search-panel { position: static; }
     }
-    form.search-panel { background: #fff; border-radius: 12px; padding: 18px; box-shadow: 0 2px 8px rgba(0,0,0,0.08); display: flex; flex-direction: column; gap: 16px; }
+    form.search-panel { background: #fff; border-radius: 12px; padding: 18px; box-shadow: 0 2px 8px rgba(0,0,0,0.08); display: flex; flex-direction: column; gap: 16px; position: sticky; top: 24px; }
     label { display: block; font-weight: 600; margin-bottom: 4px; }
     input[type="text"], textarea { width: 100%; padding: 8px 10px; border-radius: 6px; border: 1px solid #cbd2d9; font-size: 14px; box-sizing: border-box; }
     textarea { min-height: 60px; }
@@ -35,31 +36,49 @@
     .results-panel { display: flex; flex-direction: column; gap: 24px; }
     .status { font-size: 13px; color: #4b5563; }
     .message { padding: 12px; border-radius: 8px; background: #fff4e5; color: #7a3917; border: 1px solid #f3c99b; }
-    .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 18px; }
-    .card { background: #fff; border-radius: 12px; padding: 14px; box-shadow: 0 2px 6px rgba(0,0,0,0.06); display: flex; flex-direction: column; gap: 12px; }
+    .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 18px; }
+    .card { background: #fff; border-radius: 12px; padding: 14px; box-shadow: 0 2px 6px rgba(0,0,0,0.06); display: flex; flex-direction: column; gap: 12px; position: relative; }
     .card img { width: 100%; border-radius: 10px; }
     .card h3 { margin: 0; font-size: 15px; display: flex; justify-content: space-between; align-items: baseline; }
     .card h3 span.score { font-size: 13px; color: #4b5563; }
-    .card details { background: #f5f7fa; border-radius: 10px; padding: 10px; }
-    .card details summary { font-size: 14px; }
-    .detail-view { background: #fff; border-radius: 12px; padding: 18px; box-shadow: 0 2px 8px rgba(0,0,0,0.08); display: flex; flex-direction: column; gap: 16px; }
-    .detail-view h2 { margin: 0; font-size: 18px; }
-    .detail-layout { display: grid; gap: 16px; }
-    @media (min-width: 960px) {
-      .detail-layout { grid-template-columns: 2fr 1fr; }
-    }
-    .detail-img img { width: 100%; border-radius: 12px; }
+    .detail-button { background: #2563eb; color: #fff; border: none; border-radius: 8px; padding: 8px 12px; font-size: 14px; font-weight: 600; cursor: pointer; }
+    .detail-button:hover { background: #1e40af; }
     pre { background: #111827; color: #e5e7eb; padding: 12px; border-radius: 8px; font-size: 13px; overflow: auto; }
     .contrib { display: flex; flex-direction: column; gap: 6px; font-size: 13px; }
     .contrib-bar { height: 10px; background: linear-gradient(90deg, #4f46e5, #22d3ee); border-radius: 6px; }
-    .quick-actions form { display: inline-block; margin-right: 8px; }
-    .quick-actions button { background: #f3f4f6; border: 1px solid #d1d5db; border-radius: 6px; padding: 6px 10px; cursor: pointer; }
+    .quick-actions { display: flex; flex-direction: column; gap: 8px; margin-top: 4px; }
+    .quick-actions form { width: 100%; }
+    .quick-actions button { width: 100%; background: #f3f4f6; border: 1px solid #d1d5db; border-radius: 8px; padding: 8px 12px; cursor: pointer; font-weight: 600; font-size: 13px; }
     .quick-actions button:hover { background: #e5e7eb; }
+    .detail-overlay { position: fixed; inset: 0; display: none; align-items: center; justify-content: center; z-index: 2000; }
+    .detail-overlay::before { content: ""; position: absolute; inset: 0; background: rgba(15, 23, 42, 0.55); }
+    .detail-card { position: relative; display: flex; flex-direction: row; gap: 16px; width: min(90vw, 1100px); max-height: 90vh; background: #fff; border-radius: 16px; padding: 20px; box-shadow: 0 20px 40px rgba(15, 23, 42, 0.35); z-index: 2001; }
+    .detail-image-wrapper { flex: 0 0 55%; display: flex; flex-direction: column; align-items: center; gap: 12px; }
+    .detail-image-wrapper img { width: 100%; height: auto; max-height: 70vh; object-fit: contain; border-radius: 12px; background: #0f172a; }
+    .detail-info { flex: 1 1 auto; display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+    .detail-info h2 { margin: 0; font-size: 18px; }
+    .detail-info p { margin: 0; font-size: 13px; color: #475569; word-break: break-all; }
+    .detail-fields { display: grid; gap: 12px; }
+    .detail-field h3 { margin: 0 0 4px; font-size: 15px; color: #1f2933; }
+    .detail-field p { margin: 0; font-size: 15px; line-height: 1.6; color: #111827; white-space: pre-wrap; }
+    .detail-meta { display: grid; gap: 8px; font-size: 13px; color: #475569; }
+    #attr-detail-contrib { font-size: 13px; color: #111827; }
+    #attr-detail-contrib .contrib-bar { margin-top: 4px; }
+    .detail-close { position: absolute; top: 12px; right: 12px; background: transparent; border: none; font-size: 24px; line-height: 1; color: #334155; cursor: pointer; }
+    .detail-close:hover { color: #0f172a; }
+    body.modal-open { overflow: hidden; }
   </style>
 </head>
 <body>
+  <header style="background:#0f172a; color:#f8fafc; padding:12px 24px;">
+    <nav style="display:flex; gap:16px;">
+      <a href="/" style="color:#fff; font-weight:600; text-decoration:none; border-bottom:2px solid #38bdf8; padding-bottom:2px;">属性検索</a>
+      <a href="/scatter" style="color:rgba(248,250,252,0.85); font-weight:600; text-decoration:none;">意味軸マップ</a>
+      <a href="/clusters" style="color:rgba(248,250,252,0.85); font-weight:600; text-decoration:none;">クラスタマップ</a>
+    </nav>
+  </header>
   <main>
-    <h1>マルチ属性画像検索 PoC</h1>
+    <h1>属性検索</h1>
     <div class="layout">
       <form class="search-panel" action="/search" method="post" enctype="multipart/form-data">
         <input type="hidden" name="mode" value="search" />
@@ -118,44 +137,28 @@
                 <span class="score">score {{ '%.3f'|format(item.score) }}</span>
               </h3>
               <p style="margin:0; font-size:13px; color:#4b5563;">{{ item.image_path }}</p>
-              <details>
-                <summary>詳細を表示</summary>
-                <div class="detail-view" style="box-shadow:none; padding:0;">
-                  <div class="detail-layout">
-                   <div class="detail-img">
-                      <img src="data:image/jpeg;base64,{{ item.full }}" alt="large" />
-                    </div>
-                    <div class="contrib">
-                      <strong>類似度内訳</strong>
-                      {% for contrib in item.contributions %}
-                        <div>
-                          <div>{{ contrib.label }}: {{ '%.3f'|format(contrib.value) }} ({{ '%.1f'|format(contrib.percent) }}%)</div>
-                          <div class="contrib-bar" style="width: {{ contrib.percent }}%;"></div>
-                        </div>
-                      {% endfor %}
-                      <div style="margin-top:12px;">
-                        <strong>属性 JSON</strong>
-                        <pre>{{ item.attr_json }}</pre>
-                      </div>
-                    </div>
-                  </div>
-                  <div class="quick-actions">
-                    <form action="/search" method="post">
-                      <input type="hidden" name="mode" value="from_image" />
-                      <input type="hidden" name="ref_image_id" value="{{ item.image_id }}" />
-                      <button type="submit">画像類似検索</button>
-                    </form>
-                    {% for key, label in attr_labels.items() %}
-                    <form action="/search" method="post">
-                      <input type="hidden" name="mode" value="from_attr" />
-                      <input type="hidden" name="ref_image_id" value="{{ item.image_id }}" />
-                      <input type="hidden" name="ref_attr_key" value="{{ key }}" />
-                      <button type="submit">{{ label }}類似</button>
-                    </form>
-                    {% endfor %}
-                  </div>
-                </div>
-              </details>
+              <button type="button"
+                class="detail-button"
+                data-image="data:image/jpeg;base64,{{ item.full }}"
+                data-path="{{ item.image_path }}"
+                data-attrs='{{ item.attributes | tojson | safe }}'
+                data-contrib='{{ item.contributions | tojson | safe }}'
+              >詳細を表示</button>
+              <div class="quick-actions">
+                <form action="/search" method="post">
+                  <input type="hidden" name="mode" value="from_image" />
+                  <input type="hidden" name="ref_image_id" value="{{ item.image_id }}" />
+                  <button type="submit">画像類似検索</button>
+                </form>
+                {% for key, label in attr_labels.items() %}
+                <form action="/search" method="post">
+                  <input type="hidden" name="mode" value="from_attr" />
+                  <input type="hidden" name="ref_image_id" value="{{ item.image_id }}" />
+                  <input type="hidden" name="ref_attr_key" value="{{ key }}" />
+                  <button type="submit">{{ label }}類似</button>
+                </form>
+                {% endfor %}
+              </div>
             </div>
             {% endfor %}
           </div>
@@ -163,5 +166,117 @@
       </section>
     </div>
   </main>
+
+  <div id="attr-detail-overlay" class="detail-overlay" style="display:none;">
+    <div class="detail-card">
+      <button type="button" class="detail-close" id="attr-detail-close">×</button>
+      <div class="detail-image-wrapper">
+        <img id="attr-detail-image" src="" alt="detail" />
+      </div>
+      <div class="detail-info">
+        <h2>選択中の結果</h2>
+        <p id="attr-detail-path"></p>
+        <div class="detail-fields">
+          <div class="detail-field">
+            <h3>ロケーション</h3>
+            <p id="attr-detail-location">(未設定)</p>
+          </div>
+          <div class="detail-field">
+            <h3>被写体</h3>
+            <p id="attr-detail-subject">(未設定)</p>
+          </div>
+        </div>
+        <div class="detail-meta" id="attr-detail-meta"></div>
+        <div class="contrib" id="attr-detail-contrib"></div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const detailOverlay = document.getElementById('attr-detail-overlay');
+    const detailClose = document.getElementById('attr-detail-close');
+    const detailImage = document.getElementById('attr-detail-image');
+    const detailPath = document.getElementById('attr-detail-path');
+    const detailLocation = document.getElementById('attr-detail-location');
+    const detailSubject = document.getElementById('attr-detail-subject');
+    const detailMeta = document.getElementById('attr-detail-meta');
+    const detailContrib = document.getElementById('attr-detail-contrib');
+
+    function formatContributions(contrib) {
+      if (!Array.isArray(contrib) || !contrib.length) {
+        return '<p style="margin:0; font-size:13px; color:#475569;">類似度内訳はありません。</p>';
+      }
+      return contrib.map(item => {
+        const label = item.label || item.key;
+        const value = typeof item.value === 'number' ? item.value.toFixed(3) : item.value;
+        const percent = typeof item.percent === 'number' ? item.percent.toFixed(1) : item.percent;
+        return `
+          <div style="margin-bottom:8px;">
+            <div>${label}: ${value} (${percent}%)</div>
+            <div class="contrib-bar" style="width:${percent}%;"></div>
+          </div>
+        `;
+      }).join('');
+    }
+
+    function openDetailModal(imageSrc, path, attrs, contrib) {
+      detailImage.src = imageSrc || '';
+      detailPath.textContent = path || '';
+      const locationText = attrs && attrs.location ? attrs.location : '(未設定)';
+      const subjectText = attrs && attrs.subject ? attrs.subject : '(未設定)';
+      detailLocation.textContent = locationText;
+      detailSubject.textContent = subjectText;
+
+      const metaKeys = [
+        { key: 'tone', label: 'トーン' },
+        { key: 'style', label: 'スタイル' },
+        { key: 'composition', label: '構図' },
+      ];
+      const filledMeta = metaKeys
+        .map(({ key, label }) => ({ label, value: attrs && attrs[key] ? attrs[key] : '' }))
+        .filter(item => item.value && item.value.trim() !== '');
+      if (filledMeta.length) {
+        detailMeta.innerHTML = filledMeta
+          .map(item => `<div><strong>${item.label}</strong>：${item.value}</div>`)
+          .join('');
+      } else {
+        detailMeta.innerHTML = '';
+      }
+      detailContrib.innerHTML = formatContributions(contrib);
+      detailOverlay.style.display = 'flex';
+      document.body.classList.add('modal-open');
+    }
+
+    function closeDetailModal() {
+      detailOverlay.style.display = 'none';
+      document.body.classList.remove('modal-open');
+    }
+
+    detailClose.addEventListener('click', closeDetailModal);
+    detailOverlay.addEventListener('click', (event) => {
+      if (event.target === detailOverlay) {
+        closeDetailModal();
+      }
+    });
+    document.addEventListener('keydown', (event) => {
+      if (event.key === 'Escape' && detailOverlay.style.display === 'flex') {
+        closeDetailModal();
+      }
+    });
+
+    document.querySelectorAll('.detail-button').forEach(button => {
+      button.addEventListener('click', () => {
+        try {
+          const imageSrc = button.dataset.image || '';
+          const path = button.dataset.path || '';
+          const attrs = JSON.parse(button.dataset.attrs || '{}');
+          const contrib = JSON.parse(button.dataset.contrib || '[]');
+          openDetailModal(imageSrc, path, attrs, contrib);
+        } catch (error) {
+          console.error('Failed to open detail modal', error);
+        }
+      });
+    });
+  </script>
 </body>
 </html>

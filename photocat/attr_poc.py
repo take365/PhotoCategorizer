@@ -21,18 +21,24 @@ __all__ = ["ModelSpec", "run_attribute_extraction", "generate_html_report"]
 
 PROMPT_TEXT = (
     "あなたは画像解析アシスタントです。入力画像を見て、必ず JSON 形式で属性を出力してください。"
-    "出力は日本語で、短い単語ではなく自然な文章を使ってください。"
     "余計な説明やコメントは書かず、以下のキーのみを返してください。"
     "\n\n出力フォーマット:\n"
     "{\n"
-    '  "location": "海辺の砂浜が広がり、遠くには水平線と沈みかけた夕日が見える情景",\n'
-    '  "subject": "白い毛並みの犬が元気よく砂浜を走りながら波打ち際で遊んでいる様子",\n'
-    '  "tone": "暖かい雰囲気",\n'
-    '  "style": "シネマ風",\n'
-    '  "composition": "引きの構図"\n'
+    '  "location": "都会の高層ビルが並ぶ交差点で人と車が行き交っている情景を50〜100文字で記述",\n'
+    '  "subject": "主題となる被写体の行動や姿を50〜100文字で記述",\n'
+    '  "tags": {\n'
+    '    "tone": ["bright", "warm"],\n'
+    '    "style": ["cinematic"],\n'
+    '    "composition": ["wide"],\n'
+    '    "other": []\n'
+    "  }\n"
     "}\n\n"
-    "location と subject は日本語の文章で 30〜50 文字程度。"
-    "tone, style, composition は12文字以内程度の短い表現。"
+    "location と subject は日本語の自然文で 50～100 文字程度。"
+    "tags の値は以下の英語 ID のみを使い、カテゴリごとに画像の特徴に合うものを0〜3個。"
+    "tone: bright, dark, backlit, golden-hour, night, warm, cool, neutral, monochrome, sepia"
+    " / style: cinematic, vintage, minimal, dramatic"
+    " / composition: close-up, wide, top-view, low-angle, centered, thirds"
+    " / other: 通常は空配列 [] のまま。tone/style/composition に含められない特筆点がある場合のみ短い英語IDで1個まで記述。"
     "出力は JSON のみで、それ以外の文字は含めないでください。"
 )
 
@@ -66,6 +72,85 @@ def _encode_image(path: Path, max_size: int = 1024) -> tuple[str, str]:
 
 _JSON_PATTERN = re.compile(r"\{.*\}", re.DOTALL)
 
+TAG_GROUPS = {
+    "tone": (
+        "bright",
+        "dark",
+        "backlit",
+        "golden-hour",
+        "night",
+        "warm",
+        "cool",
+        "neutral",
+        "monochrome",
+        "sepia",
+    ),
+    "style": ("cinematic", "vintage", "minimal", "dramatic"),
+    "composition": ("close-up", "wide", "top-view", "low-angle", "centered", "thirds"),
+    "other": (),
+}
+
+TAG_LABELS_JA = {
+    "bright": "明るい",
+    "dark": "暗い",
+    "backlit": "逆光",
+    "golden-hour": "夕暮れ／朝焼け",
+    "night": "夜",
+    "warm": "暖色",
+    "cool": "寒色",
+    "neutral": "中立",
+    "monochrome": "白黒",
+    "sepia": "セピア",
+    "cinematic": "映画風",
+    "vintage": "レトロ",
+    "minimal": "ミニマル",
+    "dramatic": "ドラマチック",
+    "close-up": "寄り",
+    "wide": "引き",
+    "top-view": "真上",
+    "low-angle": "ローアングル",
+    "centered": "中央",
+    "thirds": "三分割",
+}
+
+TAG_SYNONYMS = {
+    "tone": {
+        "明るい": "bright",
+        "暗い": "dark",
+        "逆光": "backlit",
+        "夕暮れ": "golden-hour",
+        "朝焼け": "golden-hour",
+        "夜": "night",
+        "暖かい": "warm",
+        "暖色": "warm",
+        "寒色": "cool",
+        "涼しい": "cool",
+        "中立": "neutral",
+        "ニュートラル": "neutral",
+        "モノクロ": "monochrome",
+        "白黒": "monochrome",
+        "セピア": "sepia",
+    },
+    "style": {
+        "シネマ風": "cinematic",
+        "映画風": "cinematic",
+        "レトロ": "vintage",
+        "ミニマル": "minimal",
+        "ドラマチック": "dramatic",
+    },
+    "composition": {
+        "寄り": "close-up",
+        "クローズアップ": "close-up",
+        "引き": "wide",
+        "真上": "top-view",
+        "俯瞰": "top-view",
+        "ローアングル": "low-angle",
+        "中央": "centered",
+        "センター": "centered",
+        "三分割": "thirds",
+    },
+}
+
 
 def _parse_json_payload(text: str) -> tuple[dict[str, Any] | None, str | None]:
     """Try to parse JSON object from *text*; return (payload, error)."""
@@ -89,6 +174,84 @@ def _parse_json_payload(text: str) -> tuple[dict[str, Any] | None, str | None]:
         except json.JSONDecodeError:
             return None, "invalid json"
     return None, "invalid json"
+
+
+def _normalise_payload(value: dict[str, Any]) -> tuple[dict[str, Any] | None, str | None]:
+    """Normalise model payload to spec structure, filtering unknown tags."""
+
+    location = str(value.get("location", "")).strip()
+    subject = str(value.get("subject", "")).strip()
+    if not location or not subject:
+        return None, "location/subject missing"
+
+    tags_raw = value.get("tags", {})
+    result_tags: dict[str, list[str]] = {group: [] for group in TAG_GROUPS}
+
+    if isinstance(tags_raw, dict):
+        for group, allowed in TAG_GROUPS.items():
+            raw_values = tags_raw.get(group, [])
+            normalised = _normalise_tag_list(raw_values, group)
+            if group == "other":
+                filtered = [tag for tag in normalised if tag]
+            else:
+                filtered = [tag for tag in normalised if tag in allowed]
+            # keep order but unique
+            seen: set[str] = set()
+            unique: list[str] = []
+            max_items = 1 if group == "other" else 3
+            for tag in filtered:
+                if tag in seen:
+                    continue
+                seen.add(tag)
+                unique.append(tag)
+                if len(unique) >= max_items:
+                    break
+            result_tags[group] = unique
+    else:
+        # fall back: accept tone/style/composition at top-level for backward compat
+        for group in TAG_GROUPS:
+            if group in value:
+                normalised = _normalise_tag_list(value[group], group)
+                result_tags[group] = [tag for tag in normalised if tag in TAG_GROUPS[group]][:3]
+
+    payload: dict[str, Any] = {
+        "location": location,
+        "subject": subject,
+        "tags": result_tags,
+    }
+    return payload, None
+
+
+def _normalise_tag_list(values: Any, group: str) -> list[str]:
+    if isinstance(values, str):
+        parts = re.split(r"[、,\s]+", values)
+    elif isinstance(values, (list, tuple)):
+        parts = []
+        for item in values:
+            if isinstance(item, str):
+                parts.extend(re.split(r"[、,\s]+", item))
+    else:
+        parts = []
+
+    normalised: list[str] = []
+    synonyms = TAG_SYNONYMS.get(group, {})
+    for part in parts:
+        token_raw = part.strip()
+        if not token_raw:
+            continue
+        token = token_raw.lower()
+        if group == "other":
+            safe = re.sub(r"[^a-z0-9\-]+", "-", token).strip("-")
+            if safe:
+                normalised.append(safe)
+            continue
+        if token in TAG_GROUPS[group]:
+            normalised.append(token)
+            continue
+        jp = synonyms.get(token_raw) or synonyms.get(token)
+        if jp:
+            normalised.append(jp)
+    return normalised
 
 
 def _call_model(path: Path, spec: ModelSpec) -> dict[str, Any]:
@@ -133,9 +296,16 @@ def _call_model(path: Path, spec: ModelSpec) -> dict[str, Any]:
         "raw": text,
     }
     if parsed is not None:
-        result["data"] = parsed
-        if parse_error:
-            result["parse_note"] = parse_error
+        normalised, normalise_note = _normalise_payload(parsed)
+        if normalised is not None:
+            result["data"] = normalised
+            if parse_error:
+                result["parse_note"] = parse_error
+            if normalise_note:
+                result["normalise_note"] = normalise_note
+        else:
+            result["ok"] = False
+            result["error"] = normalise_note or parse_error or "normalisation failed"
     else:
         result["error"] = parse_error or "unknown"
     return result
@@ -146,12 +316,18 @@ def run_attribute_extraction(
     model_specs: Sequence[ModelSpec],
     *,
     limit: int = 100,
+    offset: int = 0,
     sleep: float = 0.0,
 ) -> list[dict[str, Any]]:
     """Run attribute extraction on images under *input_dir* with *model_specs*."""
 
     image_paths = list_image_paths(input_dir)
-    targets = image_paths[:limit]
+    if offset < 0:
+        offset = 0
+    if limit <= 0:
+        targets = image_paths[offset:]
+    else:
+        targets = image_paths[offset : offset + limit]
 
     records: list[dict[str, Any]] = []
     for index, path in enumerate(targets, start=1):

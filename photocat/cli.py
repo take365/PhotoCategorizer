@@ -10,14 +10,20 @@ from collections import Counter, defaultdict
 from datetime import datetime
 from html import escape
 from pathlib import Path
-from typing import Any, Iterable, Optional, Sequence
+from typing import Any, Iterable, List, Optional, Sequence
 
 import pandas as pd
 import typer
 import uvicorn
 
 from .color_judge import ColorDecision, judge_color_mode
-from .attr_index import AttributeIndexer, IndexPaths, create_text_client, load_attr_records
+from .attr_index import ATTR_KEYS, AttributeIndexer, IndexPaths, create_text_client, load_attr_records
+from .cluster_precompute import (
+    CLUSTER_ALLOWED_MODES,
+    ClusterJobConfig,
+    precompute_cluster,
+    save_artifacts,
+)
 from .attr_poc import ModelSpec, generate_html_report, run_attribute_extraction
 from .server import create_app
 from .gpt import (
@@ -935,6 +941,7 @@ def attr_poc(
     input_dir: Path = typer.Argument(..., exists=True, file_okay=False, resolve_path=True),
     env_path: Optional[Path] = typer.Option(None, "--env-path", resolve_path=True, help="Path to alternate .env"),
     limit: int = typer.Option(100, min=1, help="Maximum number of images to process"),
+    offset: int = typer.Option(0, min=0, help="Number of images to skip from the start"),
     out_dir: Path = typer.Option(Path("outputs/attr_poc"), "--out-dir", resolve_path=True),
     sleep: float = typer.Option(0.0, min=0.0, help="Seconds to sleep between images"),
     qwen_model: Optional[str] = typer.Option(None, help="Override Qwen model identifier"),
@@ -993,11 +1000,17 @@ def attr_poc(
             param_hint="--use-qwen/--use-gemma",
         )
 
-    info_lines.append(f" - Images: {input_dir} (limit={limit})")
+    info_lines.append(f" - Images: {input_dir} (offset={offset}, limit={limit})")
     typer.echo("Running attribute extraction PoC with:\n" + "\n".join(info_lines))
 
     try:
-        records = run_attribute_extraction(input_dir, model_specs, limit=limit, sleep=sleep)
+        records = run_attribute_extraction(
+            input_dir,
+            model_specs,
+            limit=limit,
+            offset=offset,
+            sleep=sleep,
+        )
     except FileNotFoundError as err:
         raise typer.BadParameter(str(err), param_hint="input_dir") from err
 
@@ -1026,6 +1039,19 @@ def attr_index(
     image_pretrained: str = typer.Option("openai", help="Pretrained weights name"),
     device: str = typer.Option("cpu", help="Torch device for image encoder"),
     reset: bool = typer.Option(False, help="Reset index directory before ingest"),
+    attr_key: List[str] = typer.Option(
+        None,
+        "--attr-key",
+        help="Attribute key(s) to ingest (repeatable). Default: all",
+        show_default=False,
+    ),
+    thumbnail_size: int = typer.Option(64, help="Max edge length for generated thumbnails"),
+    no_thumbnails: bool = typer.Option(False, help="Skip thumbnail generation"),
+    save_attr_embeddings: bool = typer.Option(
+        True,
+        "--save-attr-embeddings/--no-save-attr-embeddings",
+        help="Persist attr embeddings in compressed .npz format",
+    ),
 ) -> None:
     """Build FAISS + SQLite indices from attr_poc JSON results."""
 
@@ -1053,11 +1079,36 @@ def attr_index(
         f" - text model: {model_name}\n"
         f" - image encoder: {image_model}/{image_pretrained} (device={device})"
     )
+    if attr_key:
+        typer.echo(" - attr keys: " + ", ".join(attr_key))
+    if no_thumbnails:
+        typer.echo(" - thumbnails: disabled")
+    else:
+        typer.echo(f" - thumbnail size: {thumbnail_size}")
+    typer.echo(f" - save attr embeddings: {'yes' if save_attr_embeddings else 'no'}")
 
     records = load_attr_records(attr_json)
     if not records:
         typer.echo("No records present in attr JSON. Nothing to do.")
         return
+
+    if attr_key:
+        normalised_keys: list[str] = []
+        allowed = {key: key for key in ATTR_KEYS}
+        for key in attr_key:
+            candidate = key.strip()
+            if candidate not in allowed:
+                raise typer.BadParameter(
+                    f"Unsupported attr key '{key}'. Choose from: {', '.join(ATTR_KEYS)}",
+                    param_hint="--attr-key",
+                )
+            normalised_keys.append(allowed[candidate])
+        selected_keys: Sequence[str] = tuple(normalised_keys)
+    else:
+        selected_keys = ATTR_KEYS
+
+    if thumbnail_size <= 0:
+        raise typer.BadParameter("thumbnail-size must be >= 1", param_hint="--thumbnail-size")
 
     indexer = AttributeIndexer(
         IndexPaths(index_dir),
@@ -1066,6 +1117,9 @@ def attr_index(
         image_model=image_model,
         image_pretrained=image_pretrained,
         device=device,
+        thumbnail_size=thumbnail_size,
+        generate_thumbnails=not no_thumbnails,
+        save_embeddings=save_attr_embeddings,
     )
 
     if reset:
@@ -1073,7 +1127,7 @@ def attr_index(
         indexer.reset()
 
     typer.echo(f"Ingesting {len(records)} records…")
-    indexer.ingest_records(records)
+    indexer.ingest_records(records, attr_keys=selected_keys)
     typer.echo("Index build completed.")
 
 
@@ -1121,6 +1175,92 @@ def attr_serve(
         embed_model=model_name,
     )
     uvicorn.run(app_instance, host=host, port=port, reload=reload)
+
+
+@app.command("cluster-precompute")
+def cluster_precompute_cli(
+    index_dir: Path = typer.Option(Path("outputs/vector_index"), "--index-dir", resolve_path=True),
+    env_path: Optional[Path] = typer.Option(None, "--env-path", resolve_path=True, help="Path to alternate .env"),
+    mode: List[str] = typer.Option([], "--mode", "-m", help="対象モード（location/subject/image）。省略時はすべて。"),
+    limit: Optional[int] = typer.Option(None, "--limit", help="先頭からの上限件数。省略時は全件。"),
+    n_neighbors: int = typer.Option(30, help="UMAP の近傍数"),
+    min_dist: float = typer.Option(0.15, help="UMAP の min_dist"),
+    metric: str = typer.Option("cosine", help="UMAP の距離関数"),
+    random_state: int = typer.Option(42, help="UMAP の乱数シード"),
+    min_samples: int = typer.Option(10, help="DBSCAN の min_samples"),
+    eps: Optional[float] = typer.Option(None, help="DBSCAN の eps。省略時は自動推定"),
+    eps_percentile: float = typer.Option(90.0, help="eps自動推定時のパーセンタイル"),
+    text_model: Optional[str] = typer.Option(None, help="テキスト埋め込みモデル名"),
+    text_base_url: Optional[str] = typer.Option(None, help="埋め込みAPIのベースURL"),
+    text_api_key: Optional[str] = typer.Option(None, help="埋め込みAPIのキー"),
+) -> None:
+    """UMAP + DBSCAN の前処理を実行してクラスタマップ用データを生成する。"""
+
+    embed_base_url = (
+        text_base_url
+        or _load_env_value("EMBED_BASE_URL", env_path)
+        or _load_env_value("LMSTUDIO_BASE_URL", env_path)
+        or "http://127.0.0.1:1234/v1"
+    )
+    embed_api_key = (
+        text_api_key or _load_env_value("EMBED_API_KEY", env_path) or _load_env_value("LMSTUDIO_API_KEY", env_path) or "lm-studio"
+    )
+    model_name = (
+        text_model
+        or _load_env_value("EMBED_MODEL", env_path)
+        or _load_env_value("LMSTUDIO_EMBED_MODEL", env_path)
+        or "text-embedding-nomic-embed-text-v1.5"
+    )
+
+    selected_modes = [item.lower() for item in mode if item.strip()]
+    if not selected_modes:
+        selected_modes = list(CLUSTER_ALLOWED_MODES)
+    invalid = sorted(set(selected_modes) - set(CLUSTER_ALLOWED_MODES))
+    if invalid:
+        raise typer.BadParameter(
+            f"サポートされていないモード: {', '.join(invalid)}",
+            param_hint="--mode",
+        )
+
+    config = ClusterJobConfig(
+        n_neighbors=n_neighbors,
+        min_dist=min_dist,
+        metric=metric,
+        random_state=random_state,
+        min_samples=min_samples,
+        eps=eps,
+        eps_percentile=eps_percentile,
+        limit=limit,
+    )
+
+    typer.echo(
+        "クラスタ前処理を実行します:\n"
+        f" - index dir: {index_dir}\n"
+        f" - modes: {', '.join(selected_modes)}\n"
+        f" - UMAP: n_neighbors={config.n_neighbors}, min_dist={config.min_dist}, metric={config.metric}, seed={config.random_state}\n"
+        f" - DBSCAN: min_samples={config.min_samples}, eps={'auto' if config.eps is None else config.eps} (percentile={config.eps_percentile})"
+        + (f"\n - limit: {config.limit}" if config.limit else "")
+    )
+
+    indexer = AttributeIndexer(
+        IndexPaths(index_dir),
+        text_client=create_text_client(embed_base_url, embed_api_key),
+        text_model=model_name,
+    )
+
+    for mode_name in selected_modes:
+        typer.echo(f"\n[{mode_name}] 前処理を実行中…", nl=False)
+        try:
+            artifacts = precompute_cluster(indexer, mode_name, config)
+        except Exception as err:  # noqa: BLE001 - CLIでユーザーに見せるためまとめて捕捉
+            typer.echo(" 失敗")
+            raise typer.BadParameter(str(err), param_hint="--mode") from err
+
+        save_artifacts(indexer.paths.cluster_mode_dir(mode_name), artifacts)
+        typer.echo(" 完了")
+        typer.echo(
+            f"  - 総件数 {artifacts.meta['total']} 件 / クラスタ {artifacts.meta['cluster_count']} / ノイズ {artifacts.meta['noise_count']}"
+        )
 
 
 def main() -> None:
